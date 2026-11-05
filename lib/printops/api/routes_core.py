@@ -1,7 +1,8 @@
 """routes_core.py — 3d-api core endpoints: health, the event log (JSON + SSE), and the WebSocket.
 
   GET /v1/live     no auth. Liveness: 200 {"ok": true} when the API serves and its DB opens.
-  GET /v1/health   no auth. 200 {"status": "ok"|"degraded", db, spoolman, version};
+  GET /v1/health   no auth. 200 {"status": "ok"|"degraded", db, spoolman, backup, version};
+                   `backup` ({configured, targets, last}) is information: it never changes `status`.
                    503 when the PrintOps DB itself is unusable.
   GET /v1/events   scope read. `Accept: application/json` → one page
                    {"events": [...], "cursor": N} (`since=N` → id > N, or `last=K` → newest K).
@@ -17,24 +18,35 @@ Streams re-check their token before every read from the log: once a token is rev
 loses `read`), the SSE stream sends `event: auth_revoked` and ends, and the WebSocket sends
 {"type": "auth_revoked"} and closes with 4401 — at the next event or heartbeat (≤ HEARTBEAT_S).
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import json
+import os
 import sqlite3
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from printops import backup_run
 from printops import events as ev
 from printops.api.deps import authenticate, bearer_token, get_state, require
 from printops.api.state import ApiState
 from printops.db import applied_versions, open_db
-from printops.spoolman import SpoolmanError, missing_extra_fields
+from printops.spoolman import SpoolmanError, audit_extra_fields
 from printops.tokens import TokenRecord
 
 router = APIRouter()
@@ -49,10 +61,17 @@ def _db_health(state: ApiState) -> dict[str, Any]:
         conn = open_db(state.settings.db_path)
         try:
             versions = sorted(applied_versions(conn))
-            return {"ok": True, "migrations": versions, "last_event_id": ev.latest_id(conn)}
+            return {
+                "ok": True,
+                "migrations": versions,
+                "last_event_id": ev.latest_id(conn),
+            }
         finally:
             conn.close()
-    except (sqlite3.Error, OSError) as e:  # OSError: open_db's mkdir on an unwritable data dir
+    except (
+        sqlite3.Error,
+        OSError,
+    ) as e:  # OSError: open_db's mkdir on an unwritable data dir
         return {"ok": False, "error": str(e)}
 
 
@@ -62,12 +81,23 @@ def _spoolman_health(state: ApiState) -> dict[str, Any]:
         return {"ok": False, "error": "SPOOLMAN_URL is not set"}
     try:
         info = sp.info()
-        missing = missing_extra_fields(sp)
+        audit = audit_extra_fields(sp)
     except SpoolmanError as e:
         return {"ok": False, "error": e.message, "extra_fields": state.fields}
     fields = dict(state.fields)
-    fields["missing"] = missing
-    return {"ok": not missing, "version": info.get("version"), "extra_fields": fields}
+    fields["missing"] = audit.missing
+    body: dict[str, Any] = {
+        "ok": not audit.missing,  # leftover legacy definitions are a warning (`legacy_fields`), not a failure
+        "version": info.get("version"),
+        "extra_fields": fields,
+        "legacy_fields": audit.legacy,
+    }
+    if audit.legacy:  # information for the operator: never changes `status`, a deploy waits for "ok"
+        body["message"] = (
+            f"legacy Spoolman extra field(s) {', '.join(audit.legacy)} still defined: run "
+            "`3d printops fields migrate-native` (dry run), then `3d printops fields migrate-native --apply`"
+        )
+    return body
 
 
 @router.get("/v1/live")
@@ -84,7 +114,13 @@ def health(request: Request) -> JSONResponse:
     db = _db_health(state)
     spoolman = _spoolman_health(state)
     status = "ok" if db["ok"] and spoolman["ok"] else "degraded"
-    body = {"status": status, "version": state.settings.version, "db": db, "spoolman": spoolman}
+    body = {
+        "status": status,
+        "version": state.settings.version,
+        "db": db,
+        "spoolman": spoolman,
+        "backup": backup_run.health_summary(os.environ, state.settings),
+    }
     return JSONResponse(body, status_code=200 if db["ok"] else 503)
 
 
@@ -108,19 +144,33 @@ def _authorized(state: ApiState, token: str, scope: str) -> Callable[[], bool]:
     return check
 
 
-async def _follow(state: ApiState, cursor: int | None,
-                  authorized: Callable[[], bool]) -> AsyncGenerator[ev.Event | None, None]:
-    """Every event after `cursor` (None = after the current newest) while `authorized()` holds;
-    None = heartbeat. Ends (returns) as soon as the token is no longer valid."""
-    listener = ev.BUS.listener()  # before the first read, so no wake-up can slip between
+def _open_stream(state: ApiState) -> tuple[ev.Listener, sqlite3.Connection]:
+    """The bus listener and DB connection of one event stream; closes the listener if the DB won't open."""
+    listener = (
+        ev.BUS.listener()
+    )  # before the first read, so no wake-up can slip between
     try:
         conn = open_db(state.settings.db_path)
     except BaseException:
         listener.close()
         raise
+    return listener, conn
+
+
+async def _start_cursor(conn: sqlite3.Connection, cursor: int | None) -> int:
+    if cursor is None:
+        return await run_in_threadpool(ev.latest_id, conn)
+    return cursor
+
+
+async def _follow(
+    state: ApiState, cursor: int | None, authorized: Callable[[], bool]
+) -> AsyncGenerator[ev.Event | None, None]:
+    """Every event after `cursor` (None = after the current newest) while `authorized()` holds;
+    None = heartbeat. Ends (returns) as soon as the token is no longer valid."""
+    listener, conn = _open_stream(state)
     try:
-        if cursor is None:
-            cursor = await run_in_threadpool(ev.latest_id, conn)
+        cursor = await _start_cursor(conn, cursor)
         loop = asyncio.get_running_loop()
         next_ping = loop.time() + HEARTBEAT_S
         while True:
@@ -163,7 +213,11 @@ async def list_events(
         def page() -> dict[str, Any]:
             conn = open_db(state.settings.db_path)
             try:
-                rows = ev.last(conn, last) if last is not None else ev.since(conn, since or 0, limit)
+                rows = (
+                    ev.last(conn, last)
+                    if last is not None
+                    else ev.since(conn, since or 0, limit)
+                )
                 if rows:
                     cursor = rows[-1].id
                 elif last is not None:
@@ -180,9 +234,14 @@ async def list_events(
     last_event_id = request.headers.get("last-event-id")
     # len() first: int() of thousands of digits raises (CPython's int-conversion limit);
     # isascii(): isdigit() also accepts '²', which int() rejects
-    if (cursor is None and last_event_id and len(last_event_id) <= 19 and last_event_id.isascii()
-            and last_event_id.isdigit()
-            and int(last_event_id) <= ev.MAX_CURSOR):
+    if (
+        cursor is None
+        and last_event_id
+        and len(last_event_id) <= 19
+        and last_event_id.isascii()
+        and last_event_id.isdigit()
+        and int(last_event_id) <= ev.MAX_CURSOR
+    ):
         cursor = int(last_event_id)
 
     token = bearer_token(request.headers.get("authorization")) or ""
@@ -213,17 +272,27 @@ async def websocket_events(ws: WebSocket) -> None:
     try:
         hello = await asyncio.wait_for(ws.receive_json(), WS_AUTH_TIMEOUT_S)
     except (asyncio.TimeoutError, ValueError, WebSocketDisconnect):
-        await _ws_close(ws, 4401, "expected {\"type\": \"auth\", \"token\": ...} first")
+        await _ws_close(ws, 4401, 'expected {"type": "auth", "token": ...} first')
         return
-    token = hello.get("token") if isinstance(hello, dict) and hello.get("type") == "auth" else None
+    token = (
+        hello.get("token")
+        if isinstance(hello, dict) and hello.get("type") == "auth"
+        else None
+    )
     try:
-        who = authenticate(state, f"Bearer {token}" if isinstance(token, str) else None, "read")
+        who = authenticate(
+            state, f"Bearer {token}" if isinstance(token, str) else None, "read"
+        )
     except HTTPException as e:
         await ws.send_json({"type": "auth_invalid", "message": e.detail})
         await _ws_close(ws, 4401 if e.status_code == 401 else 4403, str(e.detail))
         return
     since = hello.get("since")
-    valid = isinstance(since, int) and not isinstance(since, bool) and 0 <= since <= ev.MAX_CURSOR
+    valid = (
+        isinstance(since, int)
+        and not isinstance(since, bool)
+        and 0 <= since <= ev.MAX_CURSOR
+    )
     cursor = since if valid else None
     if cursor is None:
         conn = open_db(state.settings.db_path)
@@ -253,10 +322,14 @@ async def websocket_events(ws: WebSocket) -> None:
 
     pump_task = asyncio.create_task(pump())
     drain_task = asyncio.create_task(drain())
-    done, pending = await asyncio.wait({pump_task, drain_task}, return_when=asyncio.FIRST_COMPLETED)
+    done, pending = await asyncio.wait(
+        {pump_task, drain_task}, return_when=asyncio.FIRST_COMPLETED
+    )
     for task in pending:
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
+        with contextlib.suppress(
+            asyncio.CancelledError, WebSocketDisconnect, RuntimeError
+        ):
             await task
     for task in done:
         exc = task.exception()
@@ -267,4 +340,3 @@ async def websocket_events(ws: WebSocket) -> None:
 async def _ws_close(ws: WebSocket, code: int, reason: str) -> None:
     with contextlib.suppress(RuntimeError, WebSocketDisconnect):
         await ws.close(code=code, reason=reason[:120])
-

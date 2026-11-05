@@ -15,7 +15,7 @@ from printer_fakes import FakeMoonraker
 from printops_fakes import FakeSpoolman
 from printops_fixtures import LiveApi, serve_api
 
-from printops.spoolman import encode_extra, ensure_extra_fields
+from printops.spoolman import ensure_extra_fields
 
 from .workflow_helper import run_cli
 
@@ -61,7 +61,6 @@ def live(
         {
             "filament_id": fil["id"],
             "location": "slot:u1/T1",
-            "extra": {"printops_slot": encode_extra("u1/T1")},
         },
     )
     with serve_api(tmp_path, fake) as api:

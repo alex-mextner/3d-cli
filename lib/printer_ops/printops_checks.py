@@ -18,6 +18,10 @@ WHAT: the G-code's per-tool facts (slicer footer + body temperatures) checked ag
                            `3d slice-warnings`) has only the profile's default colour in the footer:
                            the colour is UNVERIFIED, never graded against the spool
     slot_binding_known     every used slot has a spool in the ledger (WARN: usage not booked)
+    spool_in_sync          Spoolman and PrintOps agree about the bound spool (printops.spool_sync):
+                           the ledger's remaining = Spoolman's ± 0.5 g, the spool is where both say,
+                           no other spool in the slot. A disagreement that makes the spool untrustworthy
+                           (weight, slot clash, unknown location, …) is hard; bookkeeping only is WARN
     filament_sufficient    `; filament used [g]` + purge + margin vs the ledger interval: FAIL
                            above its high end, WARN "weigh" inside it
     drying_due             the bound spool's drying assessment (drying.assess): wet = hard, due = WARN
@@ -60,7 +64,7 @@ from __future__ import annotations
 import datetime
 import math
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -188,6 +192,53 @@ class JobFacts:
         return mm / 10 * rho * math.pi * (dia / 20) ** 2  # cm × g/cm³ × cm²
 
 
+def _record_comment(raw: str, config: dict[str, str]) -> bool:
+    """Store a `; key = value` slicer line (first wins); True when it is the calibration stamp."""
+    m = _KEY_LINE.match(raw.rstrip("\n"))
+    if m:
+        config.setdefault(m.group(1).strip(), m.group(2).strip())
+        return False
+    return raw.startswith(CALIBRATION_STAMP)
+
+
+def _tool_change(raw: str) -> int | None:
+    t = _TOOL_LINE.match(raw.strip())
+    return int(t.group(1)) if t else None
+
+
+def _heater_command(
+    raw: str, current: int | None
+) -> tuple[bool, float, int | None] | None:
+    """(is_bed, target °C, tool) of a positive M104/M109/M140/M190 line, else None."""
+    m = _TEMP_CMD.match(raw)
+    if not m:
+        return None
+    params = dict(_PARAM.findall(m.group(2)))
+    if "S" not in params or float(params["S"]) <= 0:
+        return None
+    s = float(params["S"])
+    if m.group(1) in ("M140", "M190"):
+        return True, s, None
+    return False, s, int(params["T"]) if "T" in params else current
+
+
+def _apply_heater(
+    raw: str, current: int | None, nozzle: dict[int, float], bed: float | None
+) -> float | None:
+    """Fold one `M` line into the per-tool nozzle maxima; returns the updated bed maximum."""
+    h = _heater_command(raw, current)
+    if h is None:
+        return bed
+    is_bed, s, tool = h
+    if is_bed:
+        return max(bed or 0.0, s)
+    if (
+        tool is not None
+    ):  # an untargeted heat-up before the first `Tn` is start-macro territory
+        nozzle[tool] = max(nozzle.get(tool, 0.0), s)
+    return bed
+
+
 def read_job(path: Path) -> JobFacts:
     """One pass: slicer config comments (first occurrence wins), tool changes, heater commands."""
     config: dict[str, str] = {}
@@ -200,32 +251,14 @@ def read_job(path: Path) -> JobFacts:
         for raw in fh:
             c = raw[:1]
             if c == ";":
-                m = _KEY_LINE.match(raw.rstrip("\n"))
-                if m:
-                    config.setdefault(m.group(1).strip(), m.group(2).strip())
-                elif raw.startswith(CALIBRATION_STAMP):
-                    calibration = True
+                calibration = _record_comment(raw, config) or calibration
             elif c == "T":
-                t = _TOOL_LINE.match(raw.strip())
-                if t:
-                    current = int(t.group(1))
-                    tool_lines.add(current)
+                t = _tool_change(raw)
+                if t is not None:
+                    current = t
+                    tool_lines.add(t)
             elif c == "M":
-                m = _TEMP_CMD.match(raw)
-                if not m:
-                    continue
-                params = dict(_PARAM.findall(m.group(2)))
-                if "S" not in params or float(params["S"]) <= 0:
-                    continue
-                s = float(params["S"])
-                if m.group(1) in ("M140", "M190"):
-                    bed = max(bed or 0.0, s)
-                    continue
-                tool = int(params["T"]) if "T" in params else current
-                if (
-                    tool is not None
-                ):  # an untargeted heat-up before the first `Tn` is start-macro territory
-                    nozzle[tool] = max(nozzle.get(tool, 0.0), s)
+                bed = _apply_heater(raw, current, nozzle, bed)
     job = JobFacts(str(path), config, [], nozzle, bed, calibration)
     amounts = job.num_list("filament used [mm]") or job.num_list("filament used [g]")
     # an all-zero/unreadable usage footer names no tool: fall back to the tool changes seen
@@ -278,17 +311,21 @@ def _status(grade: str, level: str) -> str:
     return {"soft": WARN, "ok": PASS}.get(grade, UNVERIFIED)
 
 
+def _merge_groups(findings: list[Finding]) -> list[tuple[str, str, str]]:
+    groups: dict[tuple[str, str], list[Finding]] = {}
+    for f in findings:
+        groups.setdefault((f.status, f.text), []).append(f)
+    return [
+        (status, text, ", ".join(_where(f) for f in fs if _where(f)))
+        for (status, text), fs in groups.items()
+    ]
+
+
 def _summarise(name: str, findings: list[Finding]) -> Check:
     """One line per check: the worst finding (identical verdicts on several slots merged into
     "T1, T4: text"); every finding under it when they differ."""
     worst = max(findings, key=lambda f: RANK[f.status])
-    groups: dict[tuple[str, str], list[Finding]] = {}
-    for f in findings:
-        groups.setdefault((f.status, f.text), []).append(f)
-    merged = [
-        (status, text, ", ".join(_where(f) for f in fs if _where(f)))
-        for (status, text), fs in groups.items()
-    ]
+    merged = _merge_groups(findings)
     shown = [m for m in merged if m[0] == worst.status]
     _, text, where = shown[0]
     detail = (
@@ -322,14 +359,43 @@ class PrintopsContext:
     offline: bool = False
     snapshot: Path | None = None
     state: Mapping[str, Any] | None = None
-    accept: frozenset[str] = frozenset()  # checks whose FAIL is accepted (ACCEPTABLE); needs `reason`
+    accept: frozenset[str] = (
+        frozenset()
+    )  # checks whose FAIL is accepted (ACCEPTABLE); needs `reason`
     reason: str = ""
     client: Any = None  # an ApiClient for record lookups (tests, in-process 3d-api); else built from `api`
 
 
 # Checks `--accept NAME --reason TEXT` may downgrade from FAIL to WARN: a mismatch the user knowingly
-# prints (other presets on purpose, #506). The reason is printed under the WARN.
-ACCEPTABLE = frozenset({"preset_match", "mix_calibration"})
+# prints (other presets on purpose #506, a spool whose Spoolman and PrintOps numbers differ and that
+# was weighed by hand #712). The reason is printed under the WARN. docs/commands/print-preflight.md
+# and the `--accept` synopsis of `3d print-preflight --help` list exactly these
+# (tests/test_printops_gates.py keeps the three in step).
+ACCEPTABLE = frozenset({"preset_match", "mix_calibration", "spool_in_sync"})
+
+
+def _parse_accept(
+    accept: str | None, reason: str | None, command: str
+) -> frozenset[str]:
+    """The validated `--accept` set; `--reason` must accompany it and nothing else."""
+    from errors import UsageError
+
+    accepted = frozenset(x.strip() for x in (accept or "").split(",") if x.strip())
+    if accepted - ACCEPTABLE:
+        raise UsageError(
+            f"--accept names {', '.join(sorted(accepted - ACCEPTABLE))}; accepted: {', '.join(sorted(ACCEPTABLE))}",
+            command=command,
+        )
+    if accept is not None and not accepted:
+        raise UsageError("--accept needs a check name", command=command)
+    if accepted and not (reason or "").strip():
+        raise UsageError(
+            "--accept needs --reason TEXT: why this mismatch is printed on purpose",
+            command=command,
+        )
+    if reason is not None and not accepted:
+        raise UsageError("--reason belongs to --accept CHECK", command=command)
+    return accepted
 
 
 def context_from_options(
@@ -358,20 +424,7 @@ def context_from_options(
     except ApiConfigError as e:
         raise UsageError(str(e), command=command) from e
     named = printer or (axis_limits if axis_limits and ":" not in axis_limits else None)
-    accepted = frozenset(x.strip() for x in (accept or "").split(",") if x.strip())
-    if accepted - ACCEPTABLE:
-        raise UsageError(
-            f"--accept names {', '.join(sorted(accepted - ACCEPTABLE))}; accepted: {', '.join(sorted(ACCEPTABLE))}",
-            command=command,
-        )
-    if accept is not None and not accepted:
-        raise UsageError("--accept needs a check name", command=command)
-    if accepted and not (reason or "").strip():
-        raise UsageError(
-            "--accept needs --reason TEXT: why this mismatch is printed on purpose", command=command
-        )
-    if reason is not None and not accepted:
-        raise UsageError("--reason belongs to --accept CHECK", command=command)
+    accepted = _parse_accept(accept, reason, command)
     return PrintopsContext(
         accept=accepted,
         reason=(reason or "").strip(),
@@ -483,9 +536,13 @@ class _Ctx:
     slicer: Mapping[str, str] = field(default_factory=dict)  # fleet `slicer:` presets
     model: str = ""  # the fleet printer's model (resolves its vendor's Orca presets)
     colourless: bool = False  # the slicer found no filament colour in the project (footer = profile default)
-    project: Path | None = None  # the plate's project 3MF (which mixes it prints), when there is one
+    project: Path | None = (
+        None  # the plate's project 3MF (which mixes it prints), when there is one
+    )
     client: Any = None  # printops.client.ApiClient for lookups the state does not carry (mix records)
-    accept: frozenset[str] = frozenset()  # checks whose hard findings the owner accepted (--accept)
+    accept: frozenset[str] = (
+        frozenset()
+    )  # checks whose hard findings the owner accepted (--accept)
     reason: str = ""  # the written reason of --accept
 
     @property
@@ -573,7 +630,9 @@ def _abrasive(
         ("G-code type", c.job.text("filament_type", t)),
     ):
         if value is not None and not isinstance(value, str):
-            invalid.append(f"invalid {src} (expected text or null, got {type(value).__name__})")
+            invalid.append(
+                f"invalid {src} (expected text or null, got {type(value).__name__})"
+            )
         elif c.policy.is_abrasive_material(value):
             return True, f"{src} {value!r}"
     if flag is not None and not isinstance(flag, bool):
@@ -590,117 +649,140 @@ def _abrasive(
     return None, "no spool data to tell whether the filament is abrasive"
 
 
+_NOZZLE_CHECK = "nozzle_compat"
+
+
+def _hardness_finding(
+    t: int,
+    slot: str,
+    material: Any,
+    required_hrc: float | None,
+) -> tuple[Finding | None, str, bool]:
+    """(finding, note for the abrasive line, stop?) of the G-code's `required_nozzle_HRC`."""
+    if required_hrc is None or required_hrc <= 0:
+        return None, "", False
+    hardness = NOZZLE_HARDNESS_HRC.get(material) if isinstance(material, str) else None
+    if hardness is None:
+        return (
+            _f(
+                _NOZZLE_CHECK,
+                "unknown",
+                f"G-code requires nozzle HRC {required_hrc:g}, but installed "
+                f"{material or 'unknown'} nozzle hardness is not known",
+                t,
+                slot,
+                "hardness",
+            ),
+            "",
+            False,
+        )
+    if required_hrc > hardness:
+        return (
+            _f(
+                _NOZZLE_CHECK,
+                "hard",
+                f"G-code requires nozzle HRC {required_hrc:g}, installed "
+                f"{material} nozzle has nominal HRC {hardness:g}",
+                t,
+                slot,
+                "hardness",
+            ),
+            "",
+            True,
+        )
+    note = (
+        f"; G-code requires nozzle HRC {required_hrc:g}, "
+        f"installed nominal HRC {hardness:g}"
+    )
+    return None, note, False
+
+
+def _abrasive_finding(
+    c: _Ctx,
+    t: int,
+    slot: str,
+    nozzle: Mapping[str, Any],
+    spool: Mapping[str, Any] | None,
+    hardness_note: str,
+) -> Finding:
+    name = _NOZZLE_CHECK
+    material = nozzle.get("material")
+    abrasive, why = _abrasive(c, t, spool)
+    why += hardness_note
+    dia = f"{float(nozzle['diameter_mm']):g} mm"
+    if abrasive is None:
+        return _f(name, "unknown", f"{dia} ok; {why}", t, slot, "abrasive")
+    if not abrasive:
+        text = f"{dia} {material or ''} nozzle; {why}".replace("  ", " ")
+        return _f(name, "ok", text, t, slot)
+    if material is None:
+        return _f(
+            name,
+            "unknown",
+            f"abrasive ({why}) and the nozzle material is not known",
+            t,
+            slot,
+            "abrasive",
+        )
+    if material in c.policy.abrasive_ok:
+        return _f(name, "ok", f"abrasive ({why}) on a {material} nozzle", t, slot)
+    return _f(
+        name,
+        "hard",
+        f"abrasive filament ({why}) on a {material} nozzle; needs "
+        f"{'/'.join(c.policy.abrasive_ok)}",
+        t,
+        slot,
+        "abrasive",
+    )
+
+
+def _nozzle_findings(
+    c: _Ctx,
+    t: int,
+    slot: str,
+    entry: Mapping[str, Any] | None,
+    head: Mapping[str, Any] | None,
+) -> list[Finding]:
+    name = _NOZZLE_CHECK
+    nozzle = (head or {}).get("nozzle")
+    spool = (entry or {}).get("spool")
+    if not nozzle:
+        return [
+            _f(
+                name,
+                "unknown",
+                "nozzle not known (fleet/printers.yaml heads[].nozzle)",
+                t,
+                slot,
+            )
+        ]
+    want = c.job.num("nozzle_diameter", t)
+    if want is not None and abs(want - float(nozzle["diameter_mm"])) > 0.01:
+        return [
+            _f(
+                name,
+                "hard",
+                f"G-code nozzle_diameter {want:g} mm, installed {nozzle['diameter_mm']:g} mm",
+                t,
+                slot,
+                "diameter",
+            )
+        ]
+    hardness, note, stop = _hardness_finding(
+        t, slot, nozzle.get("material"), c.job.num("required_nozzle_HRC", t)
+    )
+    out = [hardness] if hardness is not None else []
+    if stop:
+        return out
+    out.append(_abrasive_finding(c, t, slot, nozzle, spool, note))
+    return out
+
+
 def check_nozzle(c: _Ctx) -> list[Finding]:
-    name = "nozzle_compat"
     out: list[Finding] = []
     for t, slot, entry, head in c.tools():
-        nozzle = (head or {}).get("nozzle")
-        spool = (entry or {}).get("spool")
-        if not nozzle:
-            out.append(
-                _f(
-                    name,
-                    "unknown",
-                    "nozzle not known (fleet/printers.yaml heads[].nozzle)",
-                    t,
-                    slot,
-                )
-            )
-            continue
-        want = c.job.num("nozzle_diameter", t)
-        if want is not None and abs(want - float(nozzle["diameter_mm"])) > 0.01:
-            out.append(
-                _f(
-                    name,
-                    "hard",
-                    f"G-code nozzle_diameter {want:g} mm, installed {nozzle['diameter_mm']:g} mm",
-                    t,
-                    slot,
-                    "diameter",
-                )
-            )
-            continue
-        material = nozzle.get("material")
-        required_hrc = c.job.num("required_nozzle_HRC", t)
-        hardness_note = ""
-        if required_hrc is not None and required_hrc > 0:
-            hardness = (
-                NOZZLE_HARDNESS_HRC.get(material)
-                if isinstance(material, str)
-                else None
-            )
-            if hardness is None:
-                out.append(
-                    _f(
-                        name,
-                        "unknown",
-                        f"G-code requires nozzle HRC {required_hrc:g}, but installed "
-                        f"{material or 'unknown'} nozzle hardness is not known",
-                        t,
-                        slot,
-                        "hardness",
-                    )
-                )
-            elif required_hrc > hardness:
-                out.append(
-                    _f(
-                        name,
-                        "hard",
-                        f"G-code requires nozzle HRC {required_hrc:g}, installed "
-                        f"{material} nozzle has nominal HRC {hardness:g}",
-                        t,
-                        slot,
-                        "hardness",
-                    )
-                )
-                continue
-            else:
-                hardness_note = (
-                    f"; G-code requires nozzle HRC {required_hrc:g}, "
-                    f"installed nominal HRC {hardness:g}"
-                )
-        abrasive, why = _abrasive(c, t, spool)
-        why += hardness_note
-        dia = f"{float(nozzle['diameter_mm']):g} mm"
-        if abrasive is None:
-            out.append(_f(name, "unknown", f"{dia} ok; {why}", t, slot, "abrasive"))
-        elif not abrasive:
-            out.append(
-                _f(
-                    name,
-                    "ok",
-                    f"{dia} {material or ''} nozzle; {why}".replace("  ", " "),
-                    t,
-                    slot,
-                )
-            )
-        elif material is None:
-            out.append(
-                _f(
-                    name,
-                    "unknown",
-                    f"abrasive ({why}) and the nozzle material is not known",
-                    t,
-                    slot,
-                    "abrasive",
-                )
-            )
-        elif material in c.policy.abrasive_ok:
-            out.append(
-                _f(name, "ok", f"abrasive ({why}) on a {material} nozzle", t, slot)
-            )
-        else:
-            out.append(
-                _f(
-                    name,
-                    "hard",
-                    f"abrasive filament ({why}) on a {material} nozzle; needs "
-                    f"{'/'.join(c.policy.abrasive_ok)}",
-                    t,
-                    slot,
-                    "abrasive",
-                )
-            )
+        out.extend(_nozzle_findings(c, t, slot, entry, head))
     return out
 
 
@@ -730,6 +812,94 @@ def _bed_temps(job: JobFacts, t: int) -> list[tuple[str, float]]:
     return out
 
 
+def _nozzle_readings(c: _Ctx, t: int) -> list[tuple[str, float]]:
+    nozzle = [
+        (k, v)
+        for k in ("nozzle_temperature", "nozzle_temperature_initial_layer")
+        if (v := c.job.num(k, t)) is not None
+    ]
+    if t in c.job.body_nozzle_max:
+        nozzle.append((f"M104/M109 T{t}", c.job.body_nozzle_max[t]))
+    return nozzle
+
+
+def _nozzle_problems(
+    nozzle: list[tuple[str, float]], nmin: float, nmax: float
+) -> list[tuple[str, str]]:
+    # body heat-ups also park heads at standby temps: only too HOT counts there
+    return [
+        ("nozzle_temp", f"{key} {v:g} °C outside {nmin:g}–{nmax:g}")
+        for key, v in nozzle
+        if v > nmax or (v < nmin and not key.startswith("M10"))
+    ]
+
+
+def _temp_finding(c: _Ctx, t: int, slot: str, spool: Mapping[str, Any]) -> Finding:
+    name = "filament_temp_range"
+    problems: list[tuple[str, str]] = []
+    unknown: list[str] = []
+    nmin, nmax = _window(spool, "nozzle_temp_min", "nozzle_temp_max")
+    nozzle = _nozzle_readings(c, t)
+    if nmin is None or nmax is None:
+        unknown.append("nozzle window (filament nozzle_temp_min/max not set)")
+    else:
+        problems.extend(_nozzle_problems(nozzle, nmin, nmax))
+    bmin, bmax = _window(spool, "bed_temp_min", "bed_temp_max")
+    if bmin is None or bmax is None:
+        unknown.append("bed window (filament bed_temp_min/max not set)")
+    else:
+        problems.extend(
+            ("bed_temp", f"bed {key} {v:g} °C outside {bmin:g}–{bmax:g}")
+            for key, v in _bed_temps(c.job, t)
+            if not bmin <= v <= bmax
+        )
+    return _temp_verdict(
+        name,
+        spool,
+        t,
+        slot,
+        problems,
+        unknown,
+        nozzle,
+        (nmin, nmax, bmin, bmax),
+    )
+
+
+def _temp_verdict(
+    name: str,
+    spool: Mapping[str, Any],
+    t: int,
+    slot: str,
+    problems: list[tuple[str, str]],
+    unknown: list[str],
+    nozzle: list[tuple[str, float]],
+    windows: tuple[float | None, float | None, float | None, float | None],
+) -> Finding:
+    nmin, nmax, bmin, bmax = windows
+    who = spool.get("label") or f"spool #{spool.get('id')}"
+    if problems:
+        return _f(
+            name,
+            "hard",
+            f"{who}: " + "; ".join(p for _, p in problems),
+            t,
+            slot,
+            problems[0][0],
+        )
+    if unknown:
+        return _f(name, "unknown", f"{who}: " + ", ".join(unknown), t, slot)
+    top = max((v for _, v in nozzle), default=None)
+    return _f(
+        name,
+        "ok",
+        f"{who}: nozzle ≤{top:g} °C in {nmin:g}–{nmax:g}, bed in {bmin:g}–{bmax:g}"
+        if top is not None
+        else f"{who}: within its windows",
+        t,
+        slot,
+    )
+
+
 def check_temps(c: _Ctx) -> list[Finding]:
     name = "filament_temp_range"
     out: list[Finding] = []
@@ -737,62 +907,8 @@ def check_temps(c: _Ctx) -> list[Finding]:
         spool = (entry or {}).get("spool")
         if spool is None:
             out.append(_f(name, "unknown", c.unbound_reason, t, slot))
-            continue
-        problems: list[tuple[str, str]] = []
-        unknown: list[str] = []
-        nmin, nmax = _window(spool, "nozzle_temp_min", "nozzle_temp_max")
-        nozzle = [
-            (k, v)
-            for k in ("nozzle_temperature", "nozzle_temperature_initial_layer")
-            if (v := c.job.num(k, t)) is not None
-        ]
-        if t in c.job.body_nozzle_max:
-            nozzle.append((f"M104/M109 T{t}", c.job.body_nozzle_max[t]))
-        if nmin is None or nmax is None:
-            unknown.append("nozzle window (filament nozzle_temp_min/max not set)")
         else:
-            for key, v in nozzle:
-                # body heat-ups also park heads at standby temps: only too HOT counts there
-                if v > nmax or (v < nmin and not key.startswith("M10")):
-                    problems.append(
-                        ("nozzle_temp", f"{key} {v:g} °C outside {nmin:g}–{nmax:g}")
-                    )
-        bmin, bmax = _window(spool, "bed_temp_min", "bed_temp_max")
-        if bmin is None or bmax is None:
-            unknown.append("bed window (filament bed_temp_min/max not set)")
-        else:
-            for key, v in _bed_temps(c.job, t):
-                if not bmin <= v <= bmax:
-                    problems.append(
-                        ("bed_temp", f"bed {key} {v:g} °C outside {bmin:g}–{bmax:g}")
-                    )
-        who = spool.get("label") or f"spool #{spool.get('id')}"
-        if problems:
-            out.append(
-                _f(
-                    name,
-                    "hard",
-                    f"{who}: " + "; ".join(p for _, p in problems),
-                    t,
-                    slot,
-                    problems[0][0],
-                )
-            )
-        elif unknown:
-            out.append(_f(name, "unknown", f"{who}: " + ", ".join(unknown), t, slot))
-        else:
-            top = max((v for _, v in nozzle), default=None)
-            out.append(
-                _f(
-                    name,
-                    "ok",
-                    f"{who}: nozzle ≤{top:g} °C in {nmin:g}–{nmax:g}, bed in {bmin:g}–{bmax:g}"
-                    if top is not None
-                    else f"{who}: within its windows",
-                    t,
-                    slot,
-                )
-            )
+            out.append(_temp_finding(c, t, slot, spool))
     return out
 
 
@@ -814,7 +930,93 @@ def project_has_no_filament_colour(origin: Path, gcode: Path) -> bool:
             return False
     except (sw.SidecarError, OSError):
         return False
-    return any(sw.normalise(w.message) == _NO_FILAMENT_COLOURS for w in sw.warnings_of(data))
+    return any(
+        sw.normalise(w.message) == _NO_FILAMENT_COLOURS for w in sw.warnings_of(data)
+    )
+
+
+def _delta_e_verdict(
+    want_c: str, got_c: str, rule: Any, grade: str, kind: str, notes: list[str]
+) -> tuple[str, str]:
+    de = hex_delta_e(want_c, got_c)
+    msg = f"ΔE {de:.1f} G-code {want_c} vs loaded {got_c}"
+    if de > rule.fail_delta_e:
+        notes.insert(0, f"{msg} > {rule.fail_delta_e:g}")
+        return "hard", "colour"
+    if de > rule.warn_delta_e:
+        notes.append(f"{msg} > {rule.warn_delta_e:g}")
+        return ("soft", "colour") if grade != "hard" else (grade, kind)
+    notes.append(msg)
+    return grade, kind
+
+
+def _colour_verdict(
+    c: _Ctx,
+    t: int,
+    spool: Mapping[str, Any],
+    rule: Any,
+    grade: str,
+    kind: str,
+    notes: list[str],
+) -> tuple[str, str]:
+    """Colour part of the loaded-filament verdict; appends to `notes`."""
+    want_c = _hex(c.job.text("filament_colour", t))
+    got_c = _hex(spool.get("measured_hex")) or _hex(spool.get("color_hex"))
+    if c.colourless:
+        if grade == "ok":
+            grade, kind = "unknown", "colour"
+        notes.append(
+            f"colour not checked: the project declares no filament colour (G-code {want_c or '?'} "
+            "is the slicer profile default)"
+        )
+    elif want_c and got_c:
+        grade, kind = _delta_e_verdict(want_c, got_c, rule, grade, kind, notes)
+    elif grade == "ok":
+        grade, kind = "unknown", "colour"
+        notes.append("colour not known on " + ("the spool" if want_c else "the G-code"))
+    return grade, kind
+
+
+def _loaded_finding(
+    c: _Ctx, t: int, slot: str, spool: Mapping[str, Any], rule: Any
+) -> Finding:
+    name = "loaded_filament_match"
+    who = spool.get("label") or f"spool #{spool.get('id')}"
+    want_type = c.policy.material(c.job.text("filament_type", t))
+    got_type = c.policy.material(spool.get("material"))
+    if want_type and got_type and want_type != got_type:
+        return _f(
+            name,
+            "hard",
+            f"G-code {want_type}, loaded {who} is {got_type}",
+            t,
+            slot,
+            "type",
+        )
+    notes: list[str] = []
+    grade, kind = "ok", ""
+    if not (want_type and got_type):
+        grade, kind = "unknown", "type"
+        notes.append(
+            "type not known on " + ("the spool" if want_type else "the G-code")
+        )
+    grade, kind = _colour_verdict(c, t, spool, rule, grade, kind, notes)
+    want_v, got_v = c.job.text("filament_vendor", t), spool.get("vendor")
+    if want_v and got_v and want_v.casefold() != str(got_v).casefold():
+        if grade in ("ok", "unknown"):
+            grade, kind = "soft", "vendor"
+        notes.append(
+            f"vendor: G-code profile {want_v}, loaded {got_v} (check flow/PA calibration)"
+        )
+    lot = f", lot {spool['lot_nr']}" if spool.get("lot_nr") else ""
+    return _f(
+        name,
+        grade,
+        f"{who}{lot}: {want_type or '?'}; " + "; ".join(notes),
+        t,
+        slot,
+        kind,
+    )
 
 
 def check_loaded(c: _Ctx) -> list[Finding]:
@@ -825,72 +1027,8 @@ def check_loaded(c: _Ctx) -> list[Finding]:
         spool = (entry or {}).get("spool")
         if spool is None:
             out.append(_f(name, "unknown", c.unbound_reason, t, slot))
-            continue
-        who = spool.get("label") or f"spool #{spool.get('id')}"
-        want_type = c.policy.material(c.job.text("filament_type", t))
-        got_type = c.policy.material(spool.get("material"))
-        if want_type and got_type and want_type != got_type:
-            out.append(
-                _f(
-                    name,
-                    "hard",
-                    f"G-code {want_type}, loaded {who} is {got_type}",
-                    t,
-                    slot,
-                    "type",
-                )
-            )
-            continue
-        notes: list[str] = []
-        grade, kind = "ok", ""
-        if not (want_type and got_type):
-            grade, kind = "unknown", "type"
-            notes.append(
-                "type not known on " + ("the spool" if want_type else "the G-code")
-            )
-        want_c = _hex(c.job.text("filament_colour", t))
-        got_c = _hex(spool.get("measured_hex")) or _hex(spool.get("color_hex"))
-        if c.colourless:
-            if grade == "ok":
-                grade, kind = "unknown", "colour"
-            notes.append(
-                f"colour not checked: the project declares no filament colour (G-code {want_c or '?'} "
-                "is the slicer profile default)"
-            )
-        elif want_c and got_c:
-            de = hex_delta_e(want_c, got_c)
-            msg = f"ΔE {de:.1f} G-code {want_c} vs loaded {got_c}"
-            if de > rule.fail_delta_e:
-                grade, kind = "hard", "colour"
-                notes.insert(0, f"{msg} > {rule.fail_delta_e:g}")
-            elif de > rule.warn_delta_e:
-                grade, kind = ("soft", "colour") if grade != "hard" else (grade, kind)
-                notes.append(f"{msg} > {rule.warn_delta_e:g}")
-            else:
-                notes.append(msg)
-        elif grade == "ok":
-            grade, kind = "unknown", "colour"
-            notes.append(
-                "colour not known on " + ("the spool" if want_c else "the G-code")
-            )
-        want_v, got_v = c.job.text("filament_vendor", t), spool.get("vendor")
-        if want_v and got_v and want_v.casefold() != str(got_v).casefold():
-            if grade in ("ok", "unknown"):
-                grade, kind = "soft", "vendor"
-            notes.append(
-                f"vendor: G-code profile {want_v}, loaded {got_v} (check flow/PA calibration)"
-            )
-        lot = f", lot {spool['lot_nr']}" if spool.get("lot_nr") else ""
-        out.append(
-            _f(
-                name,
-                grade,
-                f"{who}{lot}: {want_type or '?'}; " + "; ".join(notes),
-                t,
-                slot,
-                kind,
-            )
-        )
+        else:
+            out.append(_loaded_finding(c, t, slot, spool, rule))
     return out
 
 
@@ -936,6 +1074,140 @@ def check_binding(c: _Ctx) -> list[Finding]:
     return out
 
 
+_SYNC_WEIGHT_KINDS = ("remaining", "spoolman_rolled_back")
+
+
+def _sync_findings(spool: Mapping[str, Any]) -> list[Mapping[str, Any]] | None:
+    """The spool's sync findings, None when the state does not carry them (an older 3d-api)."""
+    sync = spool.get("sync")
+    if not isinstance(sync, dict) or not isinstance(sync.get("findings"), list):
+        return None
+    return [f for f in sync["findings"] if isinstance(f, dict)]
+
+
+def _sync_finding(
+    spool: Mapping[str, Any], found: list[Mapping[str, Any]] | None, t: int, slot: str
+) -> Finding:
+    """The `spool_in_sync` finding of one bound spool from its sync findings."""
+    name = "spool_in_sync"
+    label = str(spool.get("label"))
+    if found is None:
+        return _f(
+            name,
+            "unknown",
+            f"{label}: this PrintOps state does not say whether Spoolman agrees (older 3d-api)",
+            t,
+            slot,
+        )
+    if not found:
+        return _f(name, "ok", label, t, slot)
+    fix = (
+        " — `3d printops spool drift --heal`"
+        if all(f.get("healable") for f in found)
+        else " — `3d printops spool drift`"
+    )
+    what = "; ".join(str(f.get("summary")) for f in found[:3]) + (
+        f" (+{len(found) - 3} more)" if len(found) > 3 else ""
+    )
+    hard = any(f.get("blocks") for f in found)
+    return _f(
+        name,
+        "hard" if hard else "soft",
+        f"Spoolman and PrintOps disagree: {what}{fix}",
+        t,
+        slot,
+        "drift",
+    )
+
+
+def check_spool_sync(c: _Ctx) -> list[Finding]:
+    out: list[Finding] = []
+    for t, slot, entry, _head in c.tools():
+        spool = (entry or {}).get("spool")
+        if spool is None:
+            continue  # nothing bound: slot_binding_known says so
+        out.append(_sync_finding(spool, _sync_findings(spool), t, slot))
+    return out
+
+
+def _remaining_finding(
+    spool: Mapping[str, Any],
+    rem: Mapping[str, Any],
+    need: float,
+    grams: float,
+    t: int,
+    slot: str,
+) -> Finding:
+    name = "filament_sufficient"
+    lo, hi = float(rem.get("lo_g") or 0), float(rem.get("hi_g") or 0)
+    weigh = f" — weigh it: 3d printops spool measure {spool.get('id')} GROSS_G"
+    if not rem.get("anchored") and spool.get("spoolman_remaining_g") is None:
+        # never weighed and Spoolman has no remaining weight either: unknown, not empty
+        return _f(
+            name,
+            "soft",
+            f"{spool.get('label')}: needs {need:.0f} g, remaining not known" + weigh,
+            t,
+            slot,
+            "weigh",
+        )
+    have = (
+        f"{rem.get('mid_g'):g} ± {rem.get('sigma_g'):g} g"
+        if rem.get("anchored")
+        else f"≤{hi:g} g (never weighed)"
+    )
+    msg = f"{spool.get('label')}: needs {need:.0f} g ({grams:.1f} + purge + margin), has {have}"
+    if need > hi:
+        return _f(name, "hard", msg, t, slot, "short")
+    if need > lo:
+        return _f(name, "soft", msg + weigh, t, slot, "weigh")
+    return _f(name, "ok", msg, t, slot)
+
+
+def _sufficient_finding(
+    spool: Mapping[str, Any],
+    rem: Mapping[str, Any],
+    need: float,
+    grams: float,
+    t: int,
+    slot: str,
+) -> Finding:
+    weight = [
+        f for f in _sync_findings(spool) or [] if f.get("kind") in _SYNC_WEIGHT_KINDS
+    ]
+    if not weight:
+        return _remaining_finding(spool, rem, need, grams, t, slot)
+    have = spool.get("spoolman_remaining_g")
+    if all(not f.get("blocks") for f in weight) and isinstance(have, (int, float)):
+        # the drift is only late bookkeeping (usage Moonraker booked, a first sight): Spoolman's number
+        # is the right one, so grade against it — never let a short spool through on a WARN elsewhere
+        label = spool.get("label")
+        if need > have:
+            return _f(
+                "filament_sufficient",
+                "hard",
+                f"{label}: needs {need:.0f} g ({grams:.1f} + purge + margin), Spoolman has {have:g} g "
+                f"(the ledger is behind: {weight[0].get('summary')})",
+                t,
+                slot,
+                "short",
+            )
+        return _f(
+            "filament_sufficient",
+            "ok",
+            f"{label}: needs {need:.0f} g, Spoolman has {have:g} g (the ledger is behind)",
+            t,
+            slot,
+        )
+    return _f(  # two competing numbers: this check never picks one (spool_in_sync grades it)
+        "filament_sufficient",
+        "unknown",
+        f"needs {need:.0f} g; remaining not trustworthy: {weight[0].get('summary')}",
+        t,
+        slot,
+    )
+
+
 def check_sufficient(c: _Ctx) -> list[Finding]:
     name = "filament_sufficient"
     p = c.policy
@@ -961,34 +1233,7 @@ def check_sufficient(c: _Ctx) -> list[Finding]:
                 _f(name, "unknown", f"needs {need:.0f} g; {c.unbound_reason}", t, slot)
             )
             continue
-        lo, hi = float(rem.get("lo_g") or 0), float(rem.get("hi_g") or 0)
-        weigh = f" — weigh it: 3d printops spool measure {spool.get('id')} GROSS_G"
-        if not rem.get("anchored") and spool.get("spoolman_remaining_g") is None:
-            # never weighed and Spoolman has no remaining weight either: unknown, not empty
-            out.append(
-                _f(
-                    name,
-                    "soft",
-                    f"{spool.get('label')}: needs {need:.0f} g, remaining not known"
-                    + weigh,
-                    t,
-                    slot,
-                    "weigh",
-                )
-            )
-            continue
-        have = (
-            f"{rem.get('mid_g'):g} ± {rem.get('sigma_g'):g} g"
-            if rem.get("anchored")
-            else f"≤{hi:g} g (never weighed)"
-        )
-        msg = f"{spool.get('label')}: needs {need:.0f} g ({grams:.1f} + purge + margin), has {have}"
-        if need > hi:
-            out.append(_f(name, "hard", msg, t, slot, "short"))
-        elif need > lo:
-            out.append(_f(name, "soft", msg + weigh, t, slot, "weigh"))
-        else:
-            out.append(_f(name, "ok", msg, t, slot))
+        out.append(_sufficient_finding(spool, rem, need, grams, t, slot))
     return out
 
 
@@ -1018,78 +1263,72 @@ def check_drying(c: _Ctx) -> list[Finding]:
     return out
 
 
+def _maintenance_finding(
+    name: str,
+    maint: Any,
+    t: int,
+    slot: str,
+    head: Mapping[str, Any] | None,
+) -> Finding:
+    if head is None:
+        return _f(name, "unknown", "head not in fleet/printers.yaml", t, slot)
+    if not head.get("usable", True):
+        return _f(
+            name,
+            "hard",
+            f"head {head['label']} is not usable: {head.get('reason') or '-'}",
+            t,
+            slot,
+            "unusable",
+        )
+    if not isinstance(maint, dict):
+        return _f(
+            name,
+            "unknown",
+            f"head {head['label']} usable; no maintenance records in PrintOps yet",
+            t,
+            slot,
+        )
+    return _records_finding(name, maint, head, t, slot)
+
+
+def _records_finding(
+    name: str, maint: Mapping[str, Any], head: Mapping[str, Any], t: int, slot: str
+) -> Finding:
+    faults = [
+        f
+        for f in maint.get("open_faults") or []
+        if f.get("head") in (None, head["label"])
+    ]
+    due = [d for d in maint.get("due") or [] if d.get("head") in (None, head["label"])]
+    if faults:
+        return _f(
+            name,
+            "hard",
+            "open fault: " + "; ".join(str(f.get("symptom")) for f in faults),
+            t,
+            slot,
+            "fault",
+        )
+    if due:
+        return _f(
+            name,
+            "soft",
+            "maintenance due: " + "; ".join(str(d.get("task")) for d in due),
+            t,
+            slot,
+        )
+    return _f(name, "ok", f"head {head['label']}: no open faults, nothing due", t, slot)
+
+
 def check_maintenance(c: _Ctx) -> list[Finding]:
     name = "maintenance_due"
     # added by #166: {open_faults: [{head, symptom}], due: [{task, head}]}
     maint = c.state.get("maintenance")
-    out: list[Finding] = []
-    for t, slot, _entry, head in c.tools():
-        if head is None:
-            out.append(_f(name, "unknown", "head not in fleet/printers.yaml", t, slot))
-            continue
-        if not head.get("usable", True):
-            out.append(
-                _f(
-                    name,
-                    "hard",
-                    f"head {head['label']} is not usable: {head.get('reason') or '-'}",
-                    t,
-                    slot,
-                    "unusable",
-                )
-            )
-            continue
-        if not isinstance(maint, dict):
-            out.append(
-                _f(
-                    name,
-                    "unknown",
-                    f"head {head['label']} usable; no maintenance records in PrintOps yet",
-                    t,
-                    slot,
-                )
-            )
-            continue
-        faults = [
-            f
-            for f in maint.get("open_faults") or []
-            if f.get("head") in (None, head["label"])
-        ]
-        due = [
-            d for d in maint.get("due") or [] if d.get("head") in (None, head["label"])
-        ]
-        if faults:
-            out.append(
-                _f(
-                    name,
-                    "hard",
-                    "open fault: " + "; ".join(str(f.get("symptom")) for f in faults),
-                    t,
-                    slot,
-                    "fault",
-                )
-            )
-        elif due:
-            out.append(
-                _f(
-                    name,
-                    "soft",
-                    "maintenance due: " + "; ".join(str(d.get("task")) for d in due),
-                    t,
-                    slot,
-                )
-            )
-        else:
-            out.append(
-                _f(
-                    name,
-                    "ok",
-                    f"head {head['label']}: no open faults, nothing due",
-                    t,
-                    slot,
-                )
-            )
-    return out
+    return [
+        _maintenance_finding(name, maint, t, slot, head)
+        for t, slot, _entry, head in c.tools()
+    ]
 
 
 def check_enclosure(c: _Ctx) -> list[Finding]:
@@ -1124,6 +1363,16 @@ def check_enclosure(c: _Ctx) -> list[Finding]:
     ]
 
 
+def _bad_pairings(c: _Ctx, name: str, bed: str, on_hand: list[str]) -> list[Finding]:
+    return [
+        _f(name, "hard", f"{m} on {bed}: {rule.why}", t, slot, "pairing")
+        for t, slot, entry, _head in c.tools()
+        if (m := c.material(t, (entry or {}).get("spool")))
+        for rule in c.policy.plate_rules
+        if m in rule.materials and set(on_hand) & set(rule.plates)
+    ]
+
+
 def check_plate(c: _Ctx) -> list[Finding]:
     name = "plate_material"
     bed = c.job.config.get("curr_bed_type")
@@ -1149,14 +1398,7 @@ def check_plate(c: _Ctx) -> list[Finding]:
                 kind="plate",
             )
         ]
-    out = [
-        _f(name, "hard", f"{m} on {bed}: {rule.why}", t, slot, "pairing")
-        for t, slot, entry, _head in c.tools()
-        if (m := c.material(t, (entry or {}).get("spool")))
-        for rule in c.policy.plate_rules
-        if m in rule.materials and set(on_hand) & set(rule.plates)
-    ]
-    return out or [
+    return _bad_pairings(c, name, bed, on_hand) or [
         _f(name, "ok", f"{bed} ({'/'.join(on_hand)}) on hand, no bad pairing")
     ]
 
@@ -1229,6 +1471,92 @@ def check_preset_match(c: _Ctx) -> list[Finding]:
     return _printer_process_findings(c) + _filament_findings(c)
 
 
+def _filament_value_findings(
+    c: _Ctx,
+    name: str,
+    t: int,
+    slot: str,
+    want: str,
+    preset: dict[str, Any],
+) -> list[Finding]:
+    out: list[Finding] = []
+    for key in FILAMENT_PRESET_VALUES:
+        want_n = _preset_num(preset, key)
+        if want_n is None:
+            continue
+        got_v = c.job.num(key, tool=t)
+        if got_v is None:
+            out.append(
+                _f(
+                    name,
+                    "unknown",
+                    f"the G-code has no `; {key}` (preset {want_n:g})",
+                    t,
+                    slot,
+                )
+            )
+        elif math.isclose(got_v, want_n, rel_tol=1e-6, abs_tol=1e-9):
+            out.append(_f(name, "ok", f"{key} {got_v:g} = preset", t, slot))
+        else:
+            out.append(
+                _f(
+                    name,
+                    "hard",
+                    f"{key} {got_v:g}, the filament preset {want!r} has {want_n:g} "
+                    "(edited in the slicer and not saved?)",
+                    t,
+                    slot,
+                    key,
+                )
+            )
+    return out
+
+
+def _tool_filament_findings(
+    c: _Ctx, name: str, t: int, slot: str, want: str
+) -> list[Finding]:
+    got = c.job.text("filament_settings_id", t)
+    if not got:
+        return [
+            _f(
+                name,
+                "unknown",
+                "the G-code has no `; filament_settings_id`",
+                t,
+                slot,
+            )
+        ]
+    if got != want:
+        return [
+            _f(
+                name,
+                "hard",
+                f"sliced with filament preset {got!r}, the spool on {slot} prints with {want!r}",
+                t,
+                slot,
+                "filament_settings_id",
+            )
+        ]
+    out = [_f(name, "ok", f"filament preset {got!r}", t, slot)]
+    if c.job.calibration_print:
+        out.append(
+            _f(
+                name,
+                "ok",
+                "calibration print: it varies flow and pressure advance, values not compared",
+                t,
+                slot,
+            )
+        )
+        return out
+    preset, why = _resolved_preset(c.model, "filament", want)
+    if preset is None:
+        out.append(_f(name, "ok", f"filament values not compared: {why}", t, slot))
+        return out
+    out.extend(_filament_value_findings(c, name, t, slot, want, preset))
+    return out
+
+
 def _filament_findings(c: _Ctx) -> list[Finding]:
     """The G-code's filament_settings_id and flow / pressure advance against the filament preset
     the spool bound to each used tool names (`slicer_filament_preset`, #294). A spool without one
@@ -1238,85 +1566,13 @@ def _filament_findings(c: _Ctx) -> list[Finding]:
     for t, slot, entry, _head in c.tools():
         spool = (entry or {}).get("spool") or {}
         want = spool.get("slicer_filament_preset")
-        if not (isinstance(want, str) and want):
-            continue
-        got = c.job.text("filament_settings_id", t)
-        if not got:
-            out.append(
-                _f(name, "unknown", "the G-code has no `; filament_settings_id`", t, slot)
-            )
-            continue
-        if got != want:
-            out.append(
-                _f(
-                    name,
-                    "hard",
-                    f"sliced with filament preset {got!r}, the spool on {slot} prints with {want!r}",
-                    t,
-                    slot,
-                    "filament_settings_id",
-                )
-            )
-            continue
-        out.append(_f(name, "ok", f"filament preset {got!r}", t, slot))
-        if c.job.calibration_print:
-            out.append(
-                _f(
-                    name,
-                    "ok",
-                    "calibration print: it varies flow and pressure advance, values not compared",
-                    t,
-                    slot,
-                )
-            )
-            continue
-        preset, why = _resolved_preset(c.model, "filament", want)
-        if preset is None:
-            out.append(_f(name, "ok", f"filament values not compared: {why}", t, slot))
-            continue
-        for key in FILAMENT_PRESET_VALUES:
-            want_n = _preset_num(preset, key)
-            if want_n is None:
-                continue
-            got_v = c.job.num(key, tool=t)
-            if got_v is None:
-                out.append(
-                    _f(
-                        name,
-                        "unknown",
-                        f"the G-code has no `; {key}` (preset {want_n:g})",
-                        t,
-                        slot,
-                    )
-                )
-            elif math.isclose(got_v, want_n, rel_tol=1e-6, abs_tol=1e-9):
-                out.append(_f(name, "ok", f"{key} {got_v:g} = preset", t, slot))
-            else:
-                out.append(
-                    _f(
-                        name,
-                        "hard",
-                        f"{key} {got_v:g}, the filament preset {want!r} has {want_n:g} "
-                        "(edited in the slicer and not saved?)",
-                        t,
-                        slot,
-                        key,
-                    )
-                )
+        if isinstance(want, str) and want:
+            out.extend(_tool_filament_findings(c, name, t, slot, want))
     return out
 
 
-def _printer_process_findings(c: _Ctx) -> list[Finding]:
-    name = "preset_match"
-    if not c.slicer:
-        return [
-            _f(
-                name,
-                "unknown",
-                f"no `slicer: {{machine, process}}` for {c.state.get('printer')} in "
-                "fleet/printers.yaml: nothing to compare the G-code's presets with",
-            )
-        ]
+def _preset_name_findings(c: _Ctx, name: str) -> tuple[list[Finding], bool]:
+    """Machine/process preset-name findings, and whether the process name matched."""
     out: list[Finding] = []
     process_name_matched = False
     for key, footer in (
@@ -1343,24 +1599,24 @@ def _printer_process_findings(c: _Ctx) -> list[Finding]:
                     kind=key,
                 )
             )
-    process = c.slicer.get("process")
-    if not (process and process_name_matched):
-        return out
+    return out, process_name_matched
+
+
+def _process_value_findings(c: _Ctx, name: str, process: str) -> list[Finding]:
     # The names are the primary input; a value comparison that cannot run is a note under them
     # (docs/commands/print-preflight.md), not an UNVERIFIED gate.
     if c.job.calibration_print:
-        out.append(
+        return [
             _f(
                 name,
                 "ok",
                 "calibration print: it sets its own accelerations, values not compared",
             )
-        )
-        return out
+        ]
     preset, why = _process_preset(c.model, process)
     if preset is None:
-        out.append(_f(name, "ok", f"process values not compared: {why}"))
-        return out
+        return [_f(name, "ok", f"process values not compared: {why}")]
+    out: list[Finding] = []
     for key in PRESET_VALUES:
         want_n = _preset_num(preset, key)
         if want_n is None:
@@ -1383,6 +1639,24 @@ def _printer_process_findings(c: _Ctx) -> list[Finding]:
                 )
             )
     return out
+
+
+def _printer_process_findings(c: _Ctx) -> list[Finding]:
+    name = "preset_match"
+    if not c.slicer:
+        return [
+            _f(
+                name,
+                "unknown",
+                f"no `slicer: {{machine, process}}` for {c.state.get('printer')} in "
+                "fleet/printers.yaml: nothing to compare the G-code's presets with",
+            )
+        ]
+    out, process_name_matched = _preset_name_findings(c, name)
+    process = c.slicer.get("process")
+    if not (process and process_name_matched):
+        return out
+    return out + _process_value_findings(c, name, process)
 
 
 def check_mix_calibration(c: _Ctx) -> list[Finding]:
@@ -1408,6 +1682,7 @@ CHECKS = {
     "filament_temp_range": check_temps,
     "loaded_filament_match": check_loaded,
     "slot_binding_known": check_binding,
+    "spool_in_sync": check_spool_sync,
     "filament_sufficient": check_sufficient,
     "drying_due": check_drying,
     "maintenance_due": check_maintenance,
@@ -1445,6 +1720,32 @@ def _target(job: JobFacts, fleet: Any, printer: str | None) -> tuple[Any, str]:
             f"several fleet printers are a {model}: pass --printer ({', '.join(p.name for p in matches)})",
         )
     return None, f"no fleet printer is a {model!r}: pass --printer NAME"
+
+
+def _judge(
+    name: str,
+    fn: Callable[[_Ctx], list[Finding]],
+    c: _Ctx,
+    level: str,
+    ctx: PrintopsContext,
+) -> list[Finding]:
+    """One check's findings with their policy status; the `--accept` downgrade applied."""
+    raw = fn(c)
+    if name in ctx.accept and any(f.grade == "hard" for f in raw):
+        level = "warn"
+        raw = [*raw, _f(name, "ok", f"accepted with --accept {name}: {ctx.reason}")]
+    return [
+        Finding(
+            f.check,
+            f.grade,
+            f.text,
+            f.tool,
+            f.slot,
+            f.kind,
+            _status(f.grade, level),
+        )
+        for f in raw
+    ]
 
 
 def run_checks(
@@ -1502,23 +1803,10 @@ def run_checks(
         level = policy.level(name, fp.name)
         if level == "off":
             continue
-        raw = fn(c)
-        if name in ctx.accept and any(f.grade == "hard" for f in raw):
-            level = "warn"
-            raw = [*raw, _f(name, "ok", f"accepted with --accept {name}: {ctx.reason}")]
-        findings = [
-            Finding(
-                f.check,
-                f.grade,
-                f.text,
-                f.tool,
-                f.slot,
-                f.kind,
-                _status(f.grade, level),
-            )
-            for f in raw
-        ]
-        if not findings:  # nothing to judge (e.g. mix_calibration on a plate without mixes)
+        findings = _judge(name, fn, c, level, ctx)
+        if (
+            not findings
+        ):  # nothing to judge (e.g. mix_calibration on a plate without mixes)
             continue
         result.findings.extend(findings)
         result.checks.append(_summarise(name, findings))

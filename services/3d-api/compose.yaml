@@ -5,20 +5,28 @@
 #
 # Paths default to the Odroid layout (/home/ultra is bind-mounted from the WD HDD
 # /mnt/wd500/odroid-rt/ultra); override with PRINTOPS_DATA_DIR / PRINTOPS_BACKUP_DIR.
-# Ports are published on all host interfaces: the Odroid sits behind the home router's NAT,
-# so that means LAN + tailnet (remote access is Tailscale-only). Spoolman has no auth — never
-# port-forward 7912; 3d-api requires bearer tokens on everything but /v1/health.
+# Every other host (`3d init --env`, the standalone script of `3d init --env --spoolman script`)
+# sets the knobs below: PRINTOPS_UID/GID (the host user that owns the bind-mounted data),
+# PRINTOPS_SPOOLMAN_PORT / PRINTOPS_API_PORT, PRINTOPS_BIND_ADDR, PRINTOPS_CONTAINER_PREFIX,
+# PRINTOPS_TZ, PRINTOPS_GCODE_HOST_DIR. Their defaults are the Odroid values, so its deploy is
+# unchanged.
+# Ports are published on PRINTOPS_BIND_ADDR, default 0.0.0.0 = all host interfaces: the Odroid sits
+# behind the home router's NAT, so that means LAN + tailnet (remote access is Tailscale-only).
+# Spoolman has no auth — never port-forward 7912, and on a host that is not behind such a router
+# (a laptop on public Wi-Fi, a VPS) set PRINTOPS_BIND_ADDR to 127.0.0.1 or the one LAN address that
+# needs it (`3d init --env --bind ADDR`; docker's own iptables rules bypass ufw/firewalld).
+# 3d-api requires bearer tokens on everything but /v1/health.
 name: printops
 
 services:
   spoolman:
     image: ghcr.io/donkie/spoolman:0.27.0   # multi-arch (amd64, arm64, arm/v7)
-    container_name: printops-spoolman
+    container_name: ${PRINTOPS_CONTAINER_PREFIX:-printops}-spoolman
     restart: unless-stopped
     environment:
-      TZ: Europe/Belgrade
-      PUID: "1000"                           # = ultra; Spoolman's entrypoint drops root to this uid
-      PGID: "1000"
+      TZ: ${PRINTOPS_TZ:-Europe/Belgrade}
+      PUID: ${PRINTOPS_UID:-1000}            # = ultra; Spoolman's entrypoint drops root to this uid
+      PGID: ${PRINTOPS_GID:-1000}
       SPOOLMAN_DIR_DATA: /home/app/.local/share/spoolman
       # Spoolman >= 0.26 rejects browser requests whose Origin it does not know. Fluidd calls
       # Spoolman FROM THE BROWSER (its Spoolman dialog + spool selector, GET /api/v1/info), so each
@@ -32,7 +40,7 @@ services:
     volumes:
       - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/spoolman:/home/app/.local/share/spoolman
     ports:
-      - "7912:8000"
+      - "${PRINTOPS_BIND_ADDR:-0.0.0.0}:${PRINTOPS_SPOOLMAN_PORT:-7912}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
       interval: 30s
@@ -47,20 +55,21 @@ services:
       args:
         PRINTOPS_VERSION: ${PRINTOPS_VERSION:-dev}
     image: printops/3d-api:local          # one tag, rebuilt in place (no per-deploy image pile-up)
-    container_name: printops-api
+    container_name: ${PRINTOPS_CONTAINER_PREFIX:-printops}-api
     restart: unless-stopped
+    user: "${PRINTOPS_UID:-1000}:${PRINTOPS_GID:-1000}"   # the host user that owns the bind-mounted data dirs
     depends_on:
       spoolman:
         condition: service_healthy
     environment:
-      TZ: Europe/Belgrade
+      TZ: ${PRINTOPS_TZ:-Europe/Belgrade}
       SPOOLMAN_URL: http://spoolman:8000
       PRINTOPS_DB: /data/printops.db
       PRINTOPS_TOKENS_FILE: /data/tokens.json
-      PRINTOPS_BACKUP_DIR: /backup
       SPOOLMAN_DB: /spoolman-data/spoolman.db
-      # Read-only Home Assistant REST for dry-box humidity sensors (printops.homeassistant).
-      # Empty URL = humidity unknown. Token: an HA long-lived token in <data>/api/ha_token (0600).
+      # Home Assistant REST: dry-box humidity sensors (read-only, printops.homeassistant) and the persistent
+      # notification of a failed backup (printops.backup_notify). Empty URL = humidity unknown and no notification
+      # from 3d-api (the HA package still notifies). Token: an HA long-lived token in <data>/api/ha_token (0600).
       PRINTOPS_HA_URL: ${PRINTOPS_HA_URL:-}
       PRINTOPS_HA_TOKEN_FILE: /data/ha_token
       # Incident auto-context (#165): G-code dirs inside the container (the host's
@@ -72,9 +81,17 @@ services:
       - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/api:/data
       # read for `3d printops backup` only (SQLite online backup); Spoolman stays the writer
       - ${PRINTOPS_DATA_DIR:-/home/ultra/printops/data}/spoolman:/spoolman-data
-      # inside Home Assistant's config dir, so HA's automatic daily backup carries the snapshots
-      - ${PRINTOPS_BACKUP_DIR:-/home/ultra/homeassistant/printops-backup}:/backup
+      # the BACKUP DISK (host dir PRINTOPS_BACKUP_DIR). A run refuses a directory without the disk's marker file
+      # `.3d-backup-disk` (3d printops backup target add default /backup --init-marker): an unmounted disk
+      # never fills this host's root filesystem. Home Assistant schedules the runs (packages/printops_backup.yaml).
+      # rslave: a disk mounted AFTER the container started (fstab `nofail`, a slow USB disk) shows up inside it
+      # instead of leaving the empty mount-point directory behind ("marker missing" every night).
+      - type: bind
+        source: ${PRINTOPS_BACKUP_DIR:-/home/ultra/homeassistant/printops-backup}
+        target: /backup
+        bind:
+          propagation: rslave
       # sliced plates for the incident auto-context (read-only)
       - ${PRINTOPS_GCODE_HOST_DIR:-/home/ultra/printops/gcodes}:/gcodes:ro
     ports:
-      - "8765:8765"
+      - "${PRINTOPS_BIND_ADDR:-0.0.0.0}:${PRINTOPS_API_PORT:-8765}:8765"

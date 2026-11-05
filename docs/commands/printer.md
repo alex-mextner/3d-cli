@@ -18,6 +18,9 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer status NAME [--json] [--secs S]
 3d printer upload NAME FILE.gcode [--as REMOTE]
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S] [--no-bed-move]
+                     [--colour-delta-e N] [--fix-colour [--fix-max-delta-e N]]
+3d printer slot set NAME T<n> --material M --color #RRGGBB [--brand B] [--sub-type S] [--dry-run] [--force-official] [--secs S] [--json]
+3d printer slot show NAME [--secs S] [--json]
 3d printer cancel NAME --yes
 3d printer evidence NAME [--job ID | --last] [--out DIR] [--gcode FILE.gcode] [--note TEXT] [--klippy-log FILE] [--job-file FILE]
 3d printer guard NAME --job-id ID --yes [--interval S] [--evidence DIR]
@@ -45,8 +48,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 |---|---|
 | `list` | Every fleet and configured printer: owner, access, model, address, heads (an unusable head with its reason), and where the device settings came from when a user/project file overrides the fleet. |
 | `status NAME` | State, current file and progress, temperatures, and (U1) what each head holds. |
-| `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
-| `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
+| `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. A FILE without its preview thumbnails gets them first, in place (old and new SHA-256 printed; see [`3d gcode-thumbnails`](gcode-thumbnails.md#layers-a-thumbnail-cannot-be-missing)). |
+| `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. Adds missing thumbnails to FILE in place like `upload`; the fixed bytes have another content-addressed name, so upload again. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
 | `evidence NAME --out DIR` | After EVERY print (done, cancelled, failed): save the Moonraker history job and the klippy.log lines around its pauses and errors as `DIR/<date>-<outcome>.md` + `.json`, with the layer of each stop when `--gcode` is given; GET only. See [printer-evidence.md](printer-evidence.md). |
 | `guard NAME --job-id ID --yes` | Authorize one automatic native PAUSE of this exact live Moonraker job on confirmed camera failure; [policy and readiness](printer-vision.md#one-job-automatic-pause). |
@@ -86,6 +89,56 @@ Options:
   head-sequence check on it and `3d halves-check` (without it, the head-sequence check uses
   `NAME.3mf` next to `NAME.gcode` when present).
   `3d printer start u1 out/base.gcode --yes --source-3mf print/base.3mf`
+- `--colour-delta-e N` — `start`: the preflight `slot Tn` colour tolerance, CIEDE2000, default 10
+  (see [Slot colour](#slot-colour)). `3d printer start u1 out/plate.gcode --yes --colour-delta-e 8`
+- `--fix-colour` — `start`: first rewrite the file (and its project 3MF) to the colours the printer
+  reports, print the old/new SHA-256, upload the fixed file, then run the preflight and start.
+  `3d printer start u1 out/plate.gcode --yes --fix-colour`
+- `--fix-max-delta-e N` — the largest ΔE `--fix-colour` rewrites across (default 30).
+  `3d printer start u1 out/plate.gcode --yes --fix-colour --fix-max-delta-e 40`
+
+## Slot colour
+
+The preflight `slot Tn` line compares the colour the slicer wrote (`; filament_colour`) with the
+colour the printer reports for that head by **CIEDE2000 ΔE**, default tolerance 10
+(`--colour-delta-e`), and prints the distance. The same beige PETG is `#E8D8B0` in the slice and
+`#FEE5A5` on the U1 screen: ΔE 6.4, PASS. A material mismatch is always a FAIL. Three ways out of a
+real mismatch, none of them `--force`:
+
+```bash
+# 1. the file is wrong about the colour: rewrite it at the source (G-code + project 3MF + sidecars)
+3d print-preflight out/plate.gcode --printer u1 --fix
+3d printer start u1 out/plate.gcode --yes --fix-colour     # rewrite, upload the fixed file, preflight, start
+# 2. the printer is wrong about what is loaded: write the head's record (idle printers only)
+3d printer slot set u1 T4 --material PETG --color '#E8D8B0' --brand Elegoo --dry-run
+3d printer slot set u1 T4 --material PETG --color '#E8D8B0' --brand Elegoo
+# 3. load the filament the file was sliced for
+```
+
+`--fix` / `--fix-colour` set entry *n* of `filament_colour` and `extruder_colour` to the printer's
+colour for every tool the G-code uses, in the G-code and in its project 3MF
+(`Metadata/project_settings.config`, `plate_N.json`), keep mode and mtime, move
+`NAME.slice-warnings.json` to the new G-code SHA-256 and update `NAME.manifest.json`, and print the
+old and new SHA-256 of each file (the hash is part of the stored file name, hence the upload in
+`start --fix-colour`). A head whose colour is further than `--fix-max-delta-e` (default 30) from the
+slice is refused with nothing written: that is another filament, and relabelling it would hide a
+wrong-colour print.
+
+`slot set NAME T<n> --material M --color #RRGGBB [--brand B] [--sub-type S] [--dry-run]
+[--force-official]` is `3d printers filament set NAME/T<n>` (`--brand` is its `--vendor`); `T<n>`
+is the label the printer shows (U1: T1..T4 = G-code tools T0..T3). `slot show NAME` reads the heads.
+
+**What the Snapmaker U1 accepts** (Snapmaker/u1-klipper `print_task_config.py`, issue #400): the
+touchscreen's own Klipper command `SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER=<i> VENDOR=… FILAMENT_TYPE=…
+FILAMENT_SUBTYPE=… FILAMENT_COLOR_RGBA=RRGGBBFF`, sent through `POST /printer/gcode/script` (no
+webhook endpoint exists for it) and read back from `print_task_config`. It needs vendor, type and
+sub-type together (defaults Generic / Basic), persists to `print_task.json`, resets the head's
+pressure advance (the answer prints the K it has now), and refuses a head with official RFID filament
+unless `--force-official`. 3d refuses before sending when the fleet entry is not `access: full`
+(read-only and offline printers), while printing or paused, or when Klipper is not ready. Not used:
+the RFID path `FILAMENT_DT_UPDATE` / the Extended Firmware's `POST /printer/filament_detect/set`
+(it marks the slot official, which locks later writes). Other adapters (Creality) have no
+per-head write: `slot set` exits 2 and `slot show` is the read-only comparison.
 
 ## Examples
 
@@ -1140,6 +1193,16 @@ RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE="loaded_filament_match: slice has no co
   `RIG_HATCH_REQUEST_3D_PRINTER_START_FORCE=approved:hgr-…`, redeems.
 - Approved: the start continues, prints `FORCED: starting despite preflight FAIL (...)`, and the
   helper appends the use to `~/.config/agent-tools/overrides.log`.
+- If the daemon could not even post the card (`tg-ctl ask-forward not-posted … daemon declined:
+  reason=send-failed`: its Telegram `sendMessage` failed, 2026-11-04 it was `getaddrinfo EAI_AGAIN
+  api.telegram.org`, a resolver blip while plain `tg` worked) nothing was posted, so the ask is
+  repeated after 3, 10 and 30 s (four requests in all, each reported on stderr). If it still
+  fails the start is refused with the way around Telegram: the file is already stored on the
+  printer, so start it **from the printer screen** (Files, then Print) — the screen does not run
+  these checks, do it only when the listed FAILs are understood — and with the log to read
+  (`~/.config/tg-cli/tg-ctl.*.log`, lines `sendMessage failed` / `ask-forward dropped`).
+  The daemon itself sends once and never retries (tg-cli `forwardAndPostQuestion`), which is why
+  the retry lives here.
 - Without `--force`, without the variable, denied, timed out, or without a trusted `tg-ctl` /
   helper (`~/dev/agent-tools`, then `~/xp/agent-tools`, owned by you or root and not
   group/world-writable): exit 1, nothing is sent to the printer.

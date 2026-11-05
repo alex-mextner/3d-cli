@@ -10,7 +10,8 @@ MODEL:
   - Finishing writes Spoolman spool extras `last_dried_at` = end time and `dry_state` = fresh,
     and records optional before/after weights as ledger NOTES — water loss is not filament
     usage, so it never reaches Spoolman `/use` and never anchors the remaining weight.
-  - The exposure clock of a spool runs from `last_dried_at`, else `opened_at` (Spoolman extras);
+  - The exposure clock of a spool runs from extra `last_dried_at`, else native `first_used` (Spoolman's first-use stamp, which `load` and
+    `receive --opened` also set when the spool is opened before it is used);
     the class limit (days) and the storage RH (location humidity sensor, read from Home Assistant)
     give its state: fresh → ok → due → wet. Never opened and never dried → `unknown` (sealed).
 
@@ -31,13 +32,13 @@ import contextlib
 import datetime
 import sqlite3
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from printops import events, ledger, locations
 from printops.db import transaction, utc_now
-from printops.drying_policy import DryingPolicy, Recipe
+from printops.drying_policy import ClassLimits, DryingPolicy, Recipe
 from printops.homeassistant import HaError, HaStates, Reading
 from printops.spoolman import Spoolman, SpoolmanError, decode_extra, encode_extra
 
@@ -279,6 +280,91 @@ def start(*args: Any, **kwargs: Any) -> tuple[Session, list[str]]:
         return _start(*args, **kwargs)
 
 
+def _check_start_request(ids: list[int], source: str) -> None:
+    if not ids:
+        raise DryingError("a drying session needs at least one spool")
+    if len(set(ids)) != len(ids):
+        raise DryingError(f"spool listed twice: {ids}")
+    if source not in SOURCES:
+        raise DryingError(f"source must be one of {', '.join(SOURCES)}, got {source!r}")
+
+
+def _dryer_location(conn: sqlite3.Connection, dryer: str | int) -> locations.Location:
+    loc = locations.get(conn, dryer)
+    if loc.archived:
+        raise DryingError(f"location {loc.path} is archived")
+    if loc.kind not in DRYER_KINDS:
+        raise DryingError(
+            f"location {loc.path} is a {loc.kind}, not a dryer ({' or '.join(DRYER_KINDS)})"
+        )
+    return loc
+
+
+def _load_spools(spoolman: Spoolman, ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+    spools: dict[int, dict[str, Any]] = {}
+    for sid in ids:
+        try:
+            spool = spoolman.get("spool", sid)
+        except SpoolmanError as e:
+            if e.status == 404:
+                raise DryingError(f"spool {sid} does not exist in Spoolman") from e
+            raise
+        if spool.get("archived"):
+            raise DryingError(f"spool {sid} is archived in Spoolman")
+        spools[sid] = spool
+    return spools
+
+
+def _resolve_temp(
+    temp_c: float | None,
+    known_temps: Mapping[int, float],
+    ids: Sequence[int],
+    spools: Mapping[int, Mapping[str, Any]],
+) -> float:
+    if temp_c is None:
+        if len(known_temps) < len(ids):
+            unknown = [_label(spools[s]) for s in ids if s not in known_temps]
+            raise DryingError(
+                f"no drying temperature known for {', '.join(unknown)}: pass temp_c "
+                "(or set filament extra drying_temp_c / add the material to fleet/policy.yaml)"
+            )
+        temp_c = float(min(known_temps.values()))
+    if not 20 <= temp_c <= 150:
+        raise DryingError(f"temp_c must be 20..150 °C, got {temp_c}")
+    return temp_c
+
+
+def _resolve_hours(
+    hours: float | None, recipes: Mapping[int, Recipe], ids: Sequence[int]
+) -> float:
+    if hours is None:
+        known_hours = [r.hours for r in recipes.values() if r.hours is not None]
+        if len(known_hours) < len(ids):
+            raise DryingError("no drying time known for every spool: pass hours")
+        hours = max(known_hours)
+    if not 0 < hours <= 96:
+        raise DryingError(f"hours must be in (0, 96], got {hours}")
+    return hours
+
+
+def _temp_warnings(
+    known_temps: Mapping[int, float],
+    temp_c: float,
+    spools: Mapping[int, Mapping[str, Any]],
+) -> list[str]:
+    warnings: list[str] = []
+    for sid, want in known_temps.items():
+        if want > temp_c + TEMP_TOLERANCE_C:
+            warnings.append(
+                f"{_label(spools[sid])} is rated {want} °C: at {temp_c:g} °C it may not dry fully"
+            )
+        elif want < temp_c - TEMP_TOLERANCE_C:
+            warnings.append(
+                f"{_label(spools[sid])} is rated {want} °C: {temp_c:g} °C may soften or deform it"
+            )
+    return warnings
+
+
 def _start(
     conn: sqlite3.Connection,
     spoolman: Spoolman,
@@ -297,62 +383,17 @@ def _start(
 ) -> tuple[Session, list[str]]:
     """Open a drying session; returns it and human-readable warnings."""
     ids = [int(s) for s in spool_ids]
-    if not ids:
-        raise DryingError("a drying session needs at least one spool")
-    if len(set(ids)) != len(ids):
-        raise DryingError(f"spool listed twice: {ids}")
-    if source not in SOURCES:
-        raise DryingError(f"source must be one of {', '.join(SOURCES)}, got {source!r}")
-    loc = locations.get(conn, dryer)
-    if loc.archived:
-        raise DryingError(f"location {loc.path} is archived")
-    if loc.kind not in DRYER_KINDS:
-        raise DryingError(
-            f"location {loc.path} is a {loc.kind}, not a dryer ({' or '.join(DRYER_KINDS)})"
-        )
+    _check_start_request(ids, source)
+    loc = _dryer_location(conn, dryer)
     _refuse_busy(conn, ids)
-    spools: dict[int, dict[str, Any]] = {}
-    for sid in ids:
-        try:
-            spool = spoolman.get("spool", sid)
-        except SpoolmanError as e:
-            if e.status == 404:
-                raise DryingError(f"spool {sid} does not exist in Spoolman") from e
-            raise
-        if spool.get("archived"):
-            raise DryingError(f"spool {sid} is archived in Spoolman")
-        spools[sid] = spool
+    spools = _load_spools(spoolman, ids)
     weights = _check_weights("weights_before", weights_before, ids)
     recipes = _session_recipes(policy, spools)
-    warnings: list[str] = []
 
     known_temps = {sid: r.temp_c for sid, r in recipes.items() if r.temp_c is not None}
-    if temp_c is None:
-        if len(known_temps) < len(ids):
-            unknown = [_label(spools[s]) for s in ids if s not in known_temps]
-            raise DryingError(
-                f"no drying temperature known for {', '.join(unknown)}: pass temp_c "
-                "(or set filament extra drying_temp_c / add the material to fleet/policy.yaml)"
-            )
-        temp_c = float(min(known_temps.values()))
-    if not 20 <= temp_c <= 150:
-        raise DryingError(f"temp_c must be 20..150 °C, got {temp_c}")
-    if hours is None:
-        known_hours = [r.hours for r in recipes.values() if r.hours is not None]
-        if len(known_hours) < len(ids):
-            raise DryingError("no drying time known for every spool: pass hours")
-        hours = max(known_hours)
-    if not 0 < hours <= 96:
-        raise DryingError(f"hours must be in (0, 96], got {hours}")
-    for sid, want in known_temps.items():
-        if want > temp_c + TEMP_TOLERANCE_C:
-            warnings.append(
-                f"{_label(spools[sid])} is rated {want} °C: at {temp_c:g} °C it may not dry fully"
-            )
-        elif want < temp_c - TEMP_TOLERANCE_C:
-            warnings.append(
-                f"{_label(spools[sid])} is rated {want} °C: {temp_c:g} °C may soften or deform it"
-            )
+    temp_c = _resolve_temp(temp_c, known_temps, ids, spools)
+    hours = _resolve_hours(hours, recipes, ids)
+    warnings = _temp_warnings(known_temps, temp_c, spools)
     if rh_before is not None and not 0 <= rh_before <= 100:
         raise DryingError(f"rh_before must be 0..100 %, got {rh_before}")
     if rh_before is None:
@@ -608,6 +649,57 @@ class Assessment:
         return asdict(self)
 
 
+def _read_clock(
+    a: Assessment, spool: Mapping[str, Any], limits: ClassLimits, now: datetime.datetime
+) -> None:
+    """Fill the age/limit of the first usable clock (extra last_dried_at, then native first_used)."""
+    extra = decoded_extra(spool)
+    for key, clock, limit, raw in (
+        ("last_dried_at", "dried", limits.max_days_since_dried, extra.get("last_dried_at")),
+        ("first_used", "opened", limits.max_days_opened, spool.get("first_used")),
+    ):
+        if not raw:
+            continue
+        try:
+            since = parse_ts(str(raw))
+        except ValueError:
+            a.notes.append(f"{key} {raw!r} is not a date; ignored")
+            continue
+        a.clock, a.since, a.limit_days = clock, format_ts(since), limit
+        a.age_days = round(max((now - since).total_seconds(), 0) / 86400, 2)
+        return
+
+
+def _compute_state(
+    a: Assessment, policy: DryingPolicy, recipe: Recipe, max_rh: float
+) -> str:
+    """The state from clock age and storage RH; appends the reasons to `a`."""
+    rh_high = a.rh is not None and a.rh > max_rh
+    if rh_high:
+        a.reasons.append(f"storage RH {a.rh:g}% > {max_rh:g}% ({a.rh_entity})")
+    if a.age_days is None or a.limit_days is None:
+        if not rh_high:
+            a.reasons.append(
+                "never opened or dried as far as Spoolman knows (no first_used / last_dried_at)"
+            )
+        return "due" if rh_high else "unknown"
+    if a.age_days >= a.limit_days * policy.wet_factor:
+        a.reasons.append(
+            f"{a.clock} {a.age_days:g} d ago ≥ {policy.wet_factor:g} × {a.limit_days:g} d "
+            f"({recipe.hygroscopic_class})"
+        )
+        return "wet"
+    if a.age_days >= a.limit_days or rh_high:
+        if a.age_days >= a.limit_days:
+            a.reasons.append(
+                f"{a.clock} {a.age_days:g} d ago ≥ {a.limit_days:g} d ({recipe.hygroscopic_class})"
+            )
+        return "due"
+    if a.clock == "dried" and a.age_days < policy.fresh_days:
+        return "fresh"
+    return "ok"
+
+
 def assess(
     policy: DryingPolicy,
     spool: Mapping[str, Any],
@@ -647,47 +739,8 @@ def assess(
         a.state = "drying"
         a.reasons.append("in an open drying session")
         return a
-    for key, clock, limit in (
-        ("last_dried_at", "dried", limits.max_days_since_dried),
-        ("opened_at", "opened", limits.max_days_opened),
-    ):
-        raw = extra.get(key)
-        if not raw:
-            continue
-        try:
-            since = parse_ts(str(raw))
-        except ValueError:
-            a.notes.append(f"{key} {raw!r} is not a date; ignored")
-            continue
-        a.clock, a.since, a.limit_days = clock, format_ts(since), limit
-        a.age_days = round(max((now - since).total_seconds(), 0) / 86400, 2)
-        break
-
-    rh_high = a.rh is not None and a.rh > limits.max_rh
-    if rh_high:
-        a.reasons.append(f"storage RH {a.rh:g}% > {limits.max_rh:g}% ({a.rh_entity})")
-    if a.age_days is None or a.limit_days is None:
-        computed = "due" if rh_high else "unknown"
-        if not rh_high:
-            a.reasons.append(
-                "never opened or dried as far as Spoolman knows (no opened_at / last_dried_at)"
-            )
-    elif a.age_days >= a.limit_days * policy.wet_factor:
-        computed = "wet"
-        a.reasons.append(
-            f"{a.clock} {a.age_days:g} d ago ≥ {policy.wet_factor:g} × {a.limit_days:g} d "
-            f"({recipe.hygroscopic_class})"
-        )
-    elif a.age_days >= a.limit_days or rh_high:
-        computed = "due"
-        if a.age_days >= a.limit_days:
-            a.reasons.append(
-                f"{a.clock} {a.age_days:g} d ago ≥ {a.limit_days:g} d ({recipe.hygroscopic_class})"
-            )
-    elif a.clock == "dried" and a.age_days < policy.fresh_days:
-        computed = "fresh"
-    else:
-        computed = "ok"
+    _read_clock(a, spool, limits, now)
+    computed = _compute_state(a, policy, recipe, limits.max_rh)
     if stored in ALERT_STATES and computed in ("fresh", "ok", "unknown"):
         a.notes.append(
             f"Spoolman says {stored}; only a finished drying session clears it"
@@ -700,9 +753,7 @@ def assess(
 def _spool_location(
     conn: sqlite3.Connection, spool: Mapping[str, Any], notes: list[str]
 ) -> locations.Location | None:
-    ref: str | int | None = decoded_extra(spool).get("printops_location_id")
-    if not isinstance(ref, int) or isinstance(ref, bool):
-        ref = spool.get("location") or None
+    ref: str | None = spool.get("location") or None
     if ref is None:
         return None
     try:
@@ -800,6 +851,49 @@ def check(
         return apply_states(conn, spoolman, assessments, actor=actor)
 
 
+def _write_state(
+    spoolman: Spoolman, a: Assessment, drying_now: Collection[int]
+) -> bool:
+    """Write `a.state` unless the spool moved since it was assessed; True when written."""
+    current = decoded_extra(spoolman.get("spool", a.spool_id))
+    stored_now = (
+        current.get("dry_state") if current.get("dry_state") in STATES else None
+    )
+    dried_now = str(current["last_dried_at"]) if current.get("last_dried_at") else None
+    if (
+        stored_now != a.stored_state
+        or dried_now != a.stored_dried_at
+        or a.spool_id in drying_now
+    ):
+        return False
+    spoolman.update(
+        "spool", a.spool_id, {"extra": {"dry_state": encode_extra(a.state)}}
+    )
+    return True
+
+
+def _emit_due(conn: sqlite3.Connection, a: Assessment, actor: str) -> int:
+    event = events.emit(
+        conn,
+        "drying.due",
+        f"spool:{a.spool_id}",
+        {
+            "spool_id": a.spool_id,
+            "spool": a.label,
+            "state": a.state,
+            "previous": a.stored_state,
+            "class": a.hygroscopic_class,
+            "reasons": a.reasons,
+            "age_days": a.age_days,
+            "limit_days": a.limit_days,
+            "rh": a.rh,
+            "location": a.location,
+        },
+        actor,
+    )
+    return event.id
+
+
 def apply_states(
     conn: sqlite3.Connection,
     spoolman: Spoolman,
@@ -822,22 +916,8 @@ def apply_states(
         if a.state not in STATES or a.state == a.stored_state:
             continue
         try:
-            current = decoded_extra(spoolman.get("spool", a.spool_id))
-            stored_now = (
-                current.get("dry_state") if current.get("dry_state") in STATES else None
-            )
-            dried_now = (
-                str(current["last_dried_at"]) if current.get("last_dried_at") else None
-            )
-            if (
-                stored_now != a.stored_state
-                or dried_now != a.stored_dried_at
-                or a.spool_id in drying_now
-            ):
+            if not _write_state(spoolman, a, drying_now):
                 continue
-            spoolman.update(
-                "spool", a.spool_id, {"extra": {"dry_state": encode_extra(a.state)}}
-            )
         except SpoolmanError as e:  # noqa: PERF203 — one failing spool must not stop the rest
             report.errors.append(f"spool {a.spool_id}: {e.message}")
             continue
@@ -848,23 +928,5 @@ def apply_states(
             a.stored_state == "due" and a.state == "wet"
         )
         if a.alert and entered:
-            event = events.emit(
-                conn,
-                "drying.due",
-                f"spool:{a.spool_id}",
-                {
-                    "spool_id": a.spool_id,
-                    "spool": a.label,
-                    "state": a.state,
-                    "previous": a.stored_state,
-                    "class": a.hygroscopic_class,
-                    "reasons": a.reasons,
-                    "age_days": a.age_days,
-                    "limit_days": a.limit_days,
-                    "rh": a.rh,
-                    "location": a.location,
-                },
-                actor,
-            )
-            report.alerts.append(event.id)
+            report.alerts.append(_emit_due(conn, a, actor))
     return report

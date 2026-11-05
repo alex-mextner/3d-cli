@@ -40,11 +40,11 @@ import zipfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
-from errors import MissingDependency, ThreeDError
+from errors import GateFailure, MissingDependency, ThreeDError
 from prep.contracts import Verdict
-from slicing import slice_warnings
+from slicing import slice_warnings, thumbnails
 
 CLI_FALLBACK_VERSION = "01.10.01.50"
 INSTALL_HINT = (
@@ -182,7 +182,9 @@ KNOWN_QUIRKS: tuple[Quirk, ...] = (
         "no-thumbnails",
         "The sliced G-code has no thumbnail, so the printer screen shows no preview.",
         "The CLI's export_gcode gets a null thumbnail callback.",
-        "Add thumbnails afterwards with `3d gcode-thumbnails add FILE`.",
+        "Nothing to do here: every slice through this module asks for 48x48/96x96/300x300 in the settings and "
+        "draws the missing ones from the toolpaths afterwards (`slicing.thumbnails`); by hand: "
+        "`3d gcode-thumbnails add FILE`.",
         "babushkin-dom gen/verify_slices.py (comment before add_thumbnails)",
     ),
     Quirk(
@@ -346,7 +348,13 @@ def slicing_copy(
 # --------------------------------------------------------------------------- failures
 
 FailureClass = Literal[
-    "segfault", "timeout", "lock_busy", "exclude_triangles", "return_code", "no_gcode"
+    "segfault",
+    "timeout",
+    "lock_busy",
+    "exclude_triangles",
+    "return_code",
+    "no_gcode",
+    "thumbnails",
 ]
 
 
@@ -356,6 +364,36 @@ class Failure:
     reason: str
     remediation: tuple[str, ...]
     quirk_ids: tuple[str, ...] = ()
+
+
+def _lock_was_busy(
+    heavy: bool, lock_busy_code: int | None, returncode: int, res: Mapping[str, Any]
+) -> bool:
+    """True when the heavy lock wrapper gave up (its busy exit code, and the CLI never ran to write a result)."""
+    return (
+        heavy
+        and lock_busy_code is not None
+        and returncode == lock_busy_code
+        and not res
+    )
+
+
+def _return_code_failure(code: Any, log: str, res: Mapping[str, Any]) -> Failure:
+    """The `return_code` failure: `code` is result.json's non-zero return_code, else the process exit code."""
+    detail = str(res.get("error_string") or "").strip()
+    tail = "\n".join(log.strip().splitlines()[-5:])
+    return Failure(
+        "return_code",
+        f"the slicer reported failure (return code {code})"
+        + (f": {detail}" if detail else (f"; log tail: {tail}" if tail else "")),
+        (
+            "Read slice.log in the work dir; the last [error] line names the cause.",
+            "Error -101 is the plate arrangement: keep `--arrange 0`.",
+            "Error -24 'Unsupported 3MF version': the project's Application tag is newer than the CLI's "
+            "build number; stamp it with `orca_version`.",
+        ),
+        ("arrange-moves-objects", "application-tag-newer"),
+    )
 
 
 def classify_failure(
@@ -394,12 +432,7 @@ def classify_failure(
                 "Raise timeout_s, or slice a smaller model; check the slice.log tail for the stage it stuck in.",
             ),
         )
-    if (
-        heavy
-        and lock_busy_code is not None
-        and returncode == lock_busy_code
-        and not res
-    ):
+    if _lock_was_busy(heavy, lock_busy_code, returncode, res):
         return Failure(
             "lock_busy",
             "the machine-wide heavy lock stayed busy for the whole bounded wait",
@@ -417,21 +450,7 @@ def classify_failure(
         )
     bad_rc = res_rc not in (0, None)
     if bad_rc or returncode != 0:
-        code = res_rc if bad_rc else returncode
-        detail = str(res.get("error_string") or "").strip()
-        tail = "\n".join(log.strip().splitlines()[-5:])
-        return Failure(
-            "return_code",
-            f"the slicer reported failure (return code {code})"
-            + (f": {detail}" if detail else (f"; log tail: {tail}" if tail else "")),
-            (
-                "Read slice.log in the work dir; the last [error] line names the cause.",
-                "Error -101 is the plate arrangement: keep `--arrange 0`.",
-                "Error -24 'Unsupported 3MF version': the project's Application tag is newer than the CLI's "
-                "build number; stamp it with `orca_version`.",
-            ),
-            ("arrange-moves-objects", "application-tag-newer"),
-        )
+        return _return_code_failure(res_rc if bad_rc else returncode, log, res)
     if not has_gcode:
         return Failure(
             "no_gcode",
@@ -632,21 +651,32 @@ def _prepare_workdir(work: Path) -> Path:
     return work
 
 
+def _heavy_guard(heavy: bool) -> tuple[list[str], int | None, int]:
+    """(command prefix, the lock wrapper's busy exit code, seconds the lock wait may add) for `heavy`."""
+    if not heavy:
+        return [], None, 0
+    from cli.heavy import DEFAULT_WAIT_S, EXIT_BUSY, heavy_prefix
+
+    prefix = heavy_prefix()
+    return prefix, EXIT_BUSY, DEFAULT_WAIT_S if prefix else 0
+
+
+def _finalize_thumbnails(work: Path, sliced: Path) -> Failure | None:
+    """Layer (b): the CLI never writes thumbnails; draw them before anyone hashes or copies the G-code."""
+    try:
+        thumbnails.finalize_workdir(work, sliced)
+    except GateFailure as exc:
+        return Failure("thumbnails", exc.message, tuple(exc.remediation))
+    return None
+
+
 def _run_slicer(
     cli: OrcaCli, args: list[str], work: Path, *, heavy: bool, timeout_s: int
 ) -> SliceOutcome:
     """Run `CLI --debug 2 --datadir WORK/dd ARGS` in `work` and collect the outcome. `heavy=True` puts the call
     under the machine-wide heavy lock/cap (`cli.heavy.heavy_prefix`, `[]` when the caller already holds it).
     Writes WORK/slice.log."""
-    prefix: list[str] = []
-    lock_busy_code: int | None = None
-    lock_wait_s = 0
-    if heavy:
-        from cli.heavy import DEFAULT_WAIT_S, EXIT_BUSY, heavy_prefix
-
-        prefix = heavy_prefix()
-        lock_busy_code = EXIT_BUSY
-        lock_wait_s = DEFAULT_WAIT_S if prefix else 0
+    prefix, lock_busy_code, lock_wait_s = _heavy_guard(heavy)
     timeout_bin = _gnu_timeout()
     # --foreground: no setpgid, so `timeout` and the slicer stay in the group `_run` kills. Without it
     # (behind `flock`, which is no session leader) they move to a group of their own and escape the kill.
@@ -694,9 +724,11 @@ def _run_slicer(
         lock_busy_code=lock_busy_code,
         timed_out=timed_out,
     )
+    sliced = work / "sliced.3mf"
+    if failure is None and gcode is not None:
+        failure = _finalize_thumbnails(work, sliced)
     warnings = collect_warnings(work, log)
     verdict: Verdict = "FAIL" if failure else ("WARN" if warnings else "PASS")
-    sliced = work / "sliced.3mf"
     return SliceOutcome(
         verdict=verdict,
         workdir=work,
@@ -736,7 +768,12 @@ def slice_project(
         )
     work = _prepare_workdir(Path(workdir))
     copy = work / "in.3mf"
-    slicing_copy(project, copy, set_cfg=set_cfg, drop_layer_profile=drop_layer_profile)
+    slicing_copy(
+        project,
+        copy,
+        set_cfg={**thumbnails.thumbnail_cfg(Path(project)), **(set_cfg or {})},  # layer (a)
+        drop_layer_profile=drop_layer_profile,
+    )
     args = [
         "--arrange",
         "0",
@@ -771,9 +808,11 @@ def slice_stl_with_profiles(
     work = _prepare_workdir(Path(workdir))
     model = work / Path(stl).name
     shutil.copyfile(stl, model)
+    machine_copy = work / "machine.json"  # layer (a): a copy of the machine preset that also asks for thumbnails
+    thumbnails.with_machine_spec(Path(machine), machine_copy)
     args = [
         "--load-settings",
-        f"{Path(machine).resolve()};{Path(process).resolve()}",
+        f"{machine_copy};{Path(process).resolve()}",
         "--load-filaments",
         str(Path(filament).resolve()),
         "--arrange",
@@ -928,6 +967,48 @@ def _write_probe_stl(path: Path, cx: float, cy: float) -> None:
     path.write_text("\n".join(rows) + "\n", encoding="ascii")
 
 
+def _write_flat_presets(
+    presets: SystemPresets, wanted: Sequence[tuple[str, str]], tmp: Path
+) -> dict[tuple[str, str], Path]:
+    """Each distinct (kind, name) in `wanted` flattened into a JSON file under `tmp`.
+    Raises `MissingDependency` when a named preset is not in `presets`."""
+    files: dict[tuple[str, str], Path] = {}
+    for kind, name in wanted:
+        if (kind, name) in files:
+            continue
+        try:
+            flat = presets.flat(kind, name)
+        except KeyError as exc:
+            raise MissingDependency(
+                f"system {kind} preset {name!r} (missing: {exc.args[0]!r})",
+                install=f"install Snapmaker Orca and expose its presets at {_RESOURCES_HINT}",
+                degrades="project_settings.config cannot be generated",
+                command="prep",
+            ) from exc
+        flat.update({"name": name, "from": "system", "instantiation": "true"})
+        f = tmp / f"{kind}_{len(files)}.json"  # by index: names hold dots, `;` and `/`
+        f.write_text(json.dumps(flat, indent=1), encoding="utf-8")
+        files[kind, name] = f
+    return files
+
+
+def _raise_no_reference_project(returncode: int, log: str, timed_out: bool) -> NoReturn:
+    """The probe export left no project: name the missing OpenGL runtime if that is why, else the log tail."""
+    why = "timed out" if timed_out else f"exit {returncode}"
+    if "libOpenGL" in log or "libGLU" in log:
+        raise MissingDependency(
+            "host OpenGL runtime libraries (libOpenGL.so.0, libGLU)",
+            install="sudo apt-get install libopengl0 libglu1-mesa; on a box without sudo point ORCA at a wrapper that sets LD_LIBRARY_PATH (e.g. ORCA=~/.local/bin/snapmaker-orca)",
+            degrades="headless slicing and project_settings generation",
+            command="prep",
+        )
+    raise ThreeDError(
+        f"the Orca CLI wrote no reference project ({why})",
+        command="prep",
+        remediation=[log[-1500:].strip() or "no output"],
+    )
+
+
 def reference_project_settings(
     cli: OrcaCli,
     presets: SystemPresets,
@@ -953,25 +1034,7 @@ def reference_project_settings(
     ]
     with tempfile.TemporaryDirectory(prefix="orca-ref-") as tmp_s:
         tmp = Path(tmp_s)
-        files: dict[tuple[str, str], Path] = {}
-        for kind, name in wanted:
-            if (kind, name) in files:
-                continue
-            try:
-                flat = presets.flat(kind, name)
-            except KeyError as exc:
-                raise MissingDependency(
-                    f"system {kind} preset {name!r} (missing: {exc.args[0]!r})",
-                    install=f"install Snapmaker Orca and expose its presets at {_RESOURCES_HINT}",
-                    degrades="project_settings.config cannot be generated",
-                    command="prep",
-                ) from exc
-            flat.update({"name": name, "from": "system", "instantiation": "true"})
-            f = (
-                tmp / f"{kind}_{len(files)}.json"
-            )  # by index: names hold dots, `;` and `/`
-            f.write_text(json.dumps(flat, indent=1), encoding="utf-8")
-            files[kind, name] = f
+        files = _write_flat_presets(presets, wanted, tmp)
         probe = tmp / "probe.stl"
         _write_probe_stl(probe, *bed_centre)
         prefix: list[str] = []
@@ -999,19 +1062,7 @@ def reference_project_settings(
         returncode, log, timed_out = _run(command, timeout_s)
         out = tmp / "probe.3mf"
         if not out.exists():
-            why = "timed out" if timed_out else f"exit {returncode}"
-            if "libOpenGL" in log or "libGLU" in log:
-                raise MissingDependency(
-                    "host OpenGL runtime libraries (libOpenGL.so.0, libGLU)",
-                    install="sudo apt-get install libopengl0 libglu1-mesa; on a box without sudo point ORCA at a wrapper that sets LD_LIBRARY_PATH (e.g. ORCA=~/.local/bin/snapmaker-orca)",
-                    degrades="headless slicing and project_settings generation",
-                    command="prep",
-                )
-            raise ThreeDError(
-                f"the Orca CLI wrote no reference project ({why})",
-                command="prep",
-                remediation=[log[-1500:].strip() or "no output"],
-            )
+            _raise_no_reference_project(returncode, log, timed_out)
         with zipfile.ZipFile(out) as z:
             cfg = json.loads(z.read("Metadata/project_settings.config"))
     if not isinstance(cfg, dict):

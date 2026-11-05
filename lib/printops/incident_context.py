@@ -16,7 +16,7 @@ WHAT IT FILLS, each with its source in `sources` (stored in incident.context):
   volumetric_mm3_s,  flow = speed × the slicer's ;WIDTH: × ;HEIGHT: bead (Orca's rounded
   fan_pct            rectangle). Without the G-code: the printer's live heater targets.
   head               given; else the printer's only head; else the G-code's active tool
-  spool, filament,   the spool bound to printer/head in Spoolman (`printops_slot`), or the
+  spool, filament,   the spool bound to printer/head in Spoolman (its `location` is `slot:<printer>/<head>`), or the
   vendor, lot        spool_id the reporter gave
   days_since_dried,  printops.drying assessment of that spool (Spoolman last_dried_at; the
   dry_box_rh         spool location's humidity sensor via Home Assistant, read-only)
@@ -50,6 +50,8 @@ from printops.incidents import IncidentError, obj as _obj, spool_snapshot
 from printops.spoolman import Spoolman, SpoolmanError
 
 if TYPE_CHECKING:
+    from gcode_resume import Cursor
+
     from printer_ops.base import PrinterStatus
     from printer_ops.devices import Device
 
@@ -68,7 +70,9 @@ class Readers:
 
     status: Callable[[Device], PrinterStatus] = printer_read.status
     moonraker: Callable[[Device, str], Any] = printer_read.moonraker_get
-    download: Callable[..., Path] | None = None  # printer_read.download_gcode when fetching is on
+    download: Callable[..., Path] | None = (
+        None  # printer_read.download_gcode when fetching is on
+    )
     gcode_dirs: tuple[Path, ...] = ()
     cache_dir: Path | None = None
     humidity: HaStates | None = None
@@ -78,14 +82,24 @@ class Readers:
 
     def scan_deadline(self) -> float:
         """time.monotonic() at which a G-code scan starting now gives up."""
-        return self.deadline_at if self.deadline_at is not None else time.monotonic() + self.deadline_s
+        return (
+            self.deadline_at
+            if self.deadline_at is not None
+            else time.monotonic() + self.deadline_s
+        )
 
     @classmethod
-    def from_env(cls, settings: Settings, env: Mapping[str, str] | None = None) -> Readers:
+    def from_env(
+        cls, settings: Settings, env: Mapping[str, str] | None = None
+    ) -> Readers:
         from printops.homeassistant import HaError, HaStates
 
         env = os.environ if env is None else env
-        dirs = tuple(Path(p).expanduser() for p in (env.get("PRINTOPS_GCODE_DIRS") or "").split(os.pathsep) if p.strip())
+        dirs = tuple(
+            Path(p).expanduser()
+            for p in (env.get("PRINTOPS_GCODE_DIRS") or "").split(os.pathsep)
+            if p.strip()
+        )
         fetch = (env.get("PRINTOPS_GCODE_FETCH") or "").strip().lower() in _TRUE
         try:
             humidity = HaStates.from_env(env)
@@ -136,13 +150,20 @@ def _sha256(path: Path) -> str:
     return _SHA_CACHE[key]
 
 
-def locate_gcode(
-    readers: Readers, device: Device | None, filename: str, size: int | None
-) -> tuple[Path | None, str]:
-    """(path of the job's G-code, how it was found) or (None, why not)."""
-    name = PurePosixPath(filename).name
+def _gcode_mismatch(path: Path, tag: str | None, size: int | None) -> str | None:
+    """Why this candidate is not the printer's file, or None when it is."""
+    if size is not None and path.stat().st_size != size:
+        return f"{path}: {path.stat().st_size} bytes, the printer's file has {size}"
+    if tag is not None and not _sha256(path).startswith(tag):
+        return f"{path}: SHA-256 does not start with {tag}"
+    return None
+
+
+def _local_gcode(
+    readers: Readers, name: str, size: int | None, why: list[str]
+) -> tuple[Path, str] | None:
+    """First G-code in PRINTOPS_GCODE_DIRS that matches the printer's file; mismatches go to `why`."""
     hashed = _HASHED.match(name)
-    why: list[str] = []
     for d in readers.gcode_dirs:
         candidates: list[tuple[Path, str | None]] = [(d / name, None)]
         if hashed:
@@ -150,23 +171,54 @@ def locate_gcode(
         for path, tag in candidates:
             if not path.is_file():
                 continue
-            if size is not None and path.stat().st_size != size:
-                why.append(f"{path}: {path.stat().st_size} bytes, the printer's file has {size}")
+            mismatch = _gcode_mismatch(path, tag, size)
+            if mismatch is not None:
+                why.append(mismatch)
                 continue
-            if tag is not None and not _sha256(path).startswith(tag):
-                why.append(f"{path}: SHA-256 does not start with {tag}")
-                continue
-            return path, f"local file {path}" + (f" (SHA-256 {tag}… matches)" if tag else "")
-    if readers.download is not None and device is not None and device.adapter == "moonraker" and readers.cache_dir:
-        dest = readers.cache_dir / device.name / name
-        if dest.is_file() and (size is None or dest.stat().st_size == size):
-            return dest, f"cached download {dest}"
-        try:
-            readers.download(device, filename, dest, size=size)
-        except printer_read.PrinterReadError as e:
-            why.append(str(e))
-        else:
-            return dest, f"downloaded read-only from {device.name} to {dest}"
+            return path, f"local file {path}" + (
+                f" (SHA-256 {tag}… matches)" if tag else ""
+            )
+    return None
+
+
+def _fetched_gcode(
+    readers: Readers,
+    device: Device | None,
+    filename: str,
+    name: str,
+    size: int | None,
+    why: list[str],
+) -> tuple[Path, str] | None:
+    """The cached or freshly downloaded G-code from a Moonraker printer; failures go to `why`."""
+    if not (
+        readers.download is not None
+        and device is not None
+        and device.adapter == "moonraker"
+        and readers.cache_dir
+    ):
+        return None
+    dest = readers.cache_dir / device.name / name
+    if dest.is_file() and (size is None or dest.stat().st_size == size):
+        return dest, f"cached download {dest}"
+    try:
+        readers.download(device, filename, dest, size=size)
+    except printer_read.PrinterReadError as e:
+        why.append(str(e))
+        return None
+    return dest, f"downloaded read-only from {device.name} to {dest}"
+
+
+def locate_gcode(
+    readers: Readers, device: Device | None, filename: str, size: int | None
+) -> tuple[Path | None, str]:
+    """(path of the job's G-code, how it was found) or (None, why not)."""
+    name = PurePosixPath(filename).name
+    why: list[str] = []
+    found = _local_gcode(readers, name, size, why) or _fetched_gcode(
+        readers, device, filename, name, size, why
+    )
+    if found is not None:
+        return found
     if not readers.gcode_dirs and readers.download is None:
         why.append("no PRINTOPS_GCODE_DIRS and PRINTOPS_GCODE_FETCH is off")
     elif not why:
@@ -183,24 +235,42 @@ def bead_area(width: float | None, height: float | None) -> float | None:
     return (width - height) * height + math.pi * (height / 2) ** 2
 
 
-def apply_gcode_state(ctx: Context, st: Mapping[str, Any], tool: int | None, where: str) -> None:
+def apply_gcode_state(
+    ctx: Context, st: Mapping[str, Any], tool: int | None, where: str
+) -> None:
     """Fill temperatures / fan / speed / flow / feature from a gcode_resume machine state."""
     src = f"G-code {where}"
     if tool is not None:
-        ctx.put("nozzle_temp", st["temp"].get(tool), f"{src}: M104/M109 target of tool T{tool}")
+        ctx.put(
+            "nozzle_temp",
+            st["temp"].get(tool),
+            f"{src}: M104/M109 target of tool T{tool}",
+        )
     ctx.put("bed_temp", st["bed"], f"{src}: M140/M190 target")
     ctx.put("chamber_temp", st["chamber"], f"{src}: M141/M191 target")
     fan = st["fan"].get(0)
     if fan is not None:
-        ctx.put("fan_pct", round(min(max(float(fan), 0.0), 255.0) / 255 * 100, 1), f"{src}: M106 (part fan)")
+        ctx.put(
+            "fan_pct",
+            round(min(max(float(fan), 0.0), 255.0) / 255 * 100, 1),
+            f"{src}: M106 (part fan)",
+        )
     if st["feature"]:
         ctx.put("feature", str(st["feature"]).strip().lower(), f"{src}: ;TYPE:")
     if st["fe"]:
         speed = st["fe"] / 60
-        ctx.put("speed_mm_s", round(speed, 1), f"{src}: feed rate of the last extruding move")
+        ctx.put(
+            "speed_mm_s",
+            round(speed, 1),
+            f"{src}: feed rate of the last extruding move",
+        )
         area = bead_area(st["width"], st["height"])
         if area is not None:
-            ctx.put("volumetric_mm3_s", round(speed * area, 2), f"{src}: speed × ;WIDTH: × ;HEIGHT: bead")
+            ctx.put(
+                "volumetric_mm3_s",
+                round(speed * area, 2),
+                f"{src}: speed × ;WIDTH: × ;HEIGHT: bead",
+            )
 
 
 # -- printer -----------------------------------------------------------------------------------
@@ -216,7 +286,11 @@ class Job:
 
 
 def _int(v: Any) -> int | None:
-    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return (
+        int(v)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        else None
+    )
 
 
 def job_of(status: PrinterStatus) -> Job:
@@ -255,7 +329,11 @@ def _match_head(printer: FleetPrinter, head: str) -> str:
             return h.label
     unit, _, n = head.partition("/")
     for ams in printer.ams or ():
-        if ams.id.casefold() == unit.casefold() and n.isdigit() and 1 <= int(n) <= ams.slots:
+        if (
+            ams.id.casefold() == unit.casefold()
+            and n.isdigit()
+            and 1 <= int(n) <= ams.slots
+        ):
             return f"{ams.id}/{int(n)}"
     heads = ", ".join(h.label for h in printer.heads) or "-"
     raise IncidentError(404, f"{printer.name} has no head {head!r}; heads: {heads}")
@@ -267,14 +345,20 @@ def _head_obj(printer: FleetPrinter | None, label: str | None) -> Head | None:
     return next((h for h in printer.heads if h.label == label), None)
 
 
-def _moonraker_job(readers: Readers, device: Device, ctx: Context) -> dict[str, Any] | None:
+def _moonraker_job(
+    readers: Readers, device: Device, ctx: Context
+) -> dict[str, Any] | None:
     try:
         page = readers.moonraker(device, "/server/history/list?limit=1&order=desc")
     except printer_read.PrinterReadError as e:
         ctx.warnings.append(f"job history unreadable: {e}")
         return None
     jobs = page.get("jobs") if isinstance(page, dict) else None
-    return jobs[0] if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict) else None
+    return (
+        jobs[0]
+        if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict)
+        else None
+    )
 
 
 # -- the resolver ------------------------------------------------------------------------------
@@ -294,26 +378,13 @@ def resolve(
     fleet_printer: FleetPrinter | None = None
     device: Device | None = None
     if printer:
-        try:
-            entry = printer_read.device_for(printer)
-        except LookupError as e:
-            raise IncidentError(404, str(e)) from e
-        except printer_read.PrinterReadError as e:
-            ctx.warnings.append(str(e))
-        else:
-            fleet_printer, device = entry.printer, entry.device
-        ctx.put("printer", printer, "reported")
-        if head and fleet_printer is not None:
-            head = _match_head(fleet_printer, head)
-        if head:
-            ctx.put("head", head, "reported")
-        elif fleet_printer is not None and len(fleet_printer.heads) == 1:
-            head = fleet_printer.heads[0].label
-            ctx.put("head", head, "fleet: the printer's only head")
+        fleet_printer, device, head = _resolve_printer(ctx, printer, head)
 
     status = None
     if fleet_printer is not None and device is None:
-        ctx.warnings.append(f"{printer} is an offline printer: not contacted, no job/layer/temperatures")
+        ctx.warnings.append(
+            f"{printer} is an offline printer: not contacted, no job/layer/temperatures"
+        )
     elif device is not None:
         try:
             status = readers.status(device)
@@ -327,90 +398,210 @@ def resolve(
     return ctx
 
 
+def _resolve_printer(
+    ctx: Context, printer: str, head: str | None
+) -> tuple[FleetPrinter | None, Device | None, str | None]:
+    """Look the reported printer up in the fleet and settle which head the report is about."""
+    fleet_printer: FleetPrinter | None = None
+    device: Device | None = None
+    try:
+        entry = printer_read.device_for(printer)
+    except LookupError as e:
+        raise IncidentError(404, str(e)) from e
+    except printer_read.PrinterReadError as e:
+        ctx.warnings.append(str(e))
+    else:
+        fleet_printer, device = entry.printer, entry.device
+    ctx.put("printer", printer, "reported")
+    if head and fleet_printer is not None:
+        head = _match_head(fleet_printer, head)
+    if head:
+        ctx.put("head", head, "reported")
+    elif fleet_printer is not None and len(fleet_printer.heads) == 1:
+        head = fleet_printer.heads[0].label
+        ctx.put("head", head, "fleet: the printer's only head")
+    return fleet_printer, device, head
+
+
 def _from_printer(
-    ctx: Context, readers: Readers, device: Device, fleet_printer: FleetPrinter | None, status: PrinterStatus
+    ctx: Context,
+    readers: Readers,
+    device: Device,
+    fleet_printer: FleetPrinter | None,
+    status: PrinterStatus,
 ) -> None:
     ctx.printer_state = status.state
     job = job_of(status)
     src = f"{device.name} status"
-    hist = _moonraker_job(readers, device, ctx) if device.adapter == "moonraker" else None
-    if job.active:
-        ctx.put("job_file", job.filename, src)
-        ctx.put("layer", job.layer, f"{src}: current layer")
-        if hist and hist.get("status") == "in_progress" and hist.get("filename") == job.filename:
-            ctx.put("job_id", str(hist.get("job_id")), f"{device.name} Moonraker history (in-progress job)")
-    else:
-        last = hist.get("filename") if hist else job.filename
-        if last:
-            ctx.put("job_file", last, f"{src}: the last job (printer is {status.state})")
-            if hist:
-                ctx.put("job_id", str(hist.get("job_id")), f"{device.name} Moonraker history (last job, {hist.get('status')})")
-            ctx.warnings.append(f"printer is {status.state}: job = the last job, layer and G-code settings unknown")
+    hist = (
+        _moonraker_job(readers, device, ctx) if device.adapter == "moonraker" else None
+    )
+    _put_job(ctx, job, hist, device, status, src)
 
     head_label = ctx.fields.get("head")
     head = _head_obj(fleet_printer, head_label)
-    extruder = head.extruder if head and head.extruder else ("nozzle" if "nozzle" in status.temps else None)
-    if extruder and extruder in status.temps:
-        actual, target = status.temps[extruder]
-        ctx.telemetry["nozzle"] = {"heater": extruder, "actual": actual, "target": target}
-    if "bed" in status.temps:
-        actual, target = status.temps["bed"]
-        ctx.telemetry["bed"] = {"actual": actual, "target": target}
+    _put_telemetry(ctx, head, status)
 
     if job.active and job.filename:
         _from_gcode(ctx, readers, device, fleet_printer, job, head)
-    for key, tel in (("nozzle_temp", ctx.telemetry.get("nozzle")), ("bed_temp", ctx.telemetry.get("bed"))):
+    for key, tel in (
+        ("nozzle_temp", ctx.telemetry.get("nozzle")),
+        ("bed_temp", ctx.telemetry.get("bed")),
+    ):
         if key not in ctx.fields and tel and tel.get("target"):
             ctx.put(key, tel["target"], f"{src}: live heater target")
 
 
-def _from_gcode(
-    ctx: Context, readers: Readers, device: Device, fleet_printer: FleetPrinter | None, job: Job, head: Head | None
+def _put_job(
+    ctx: Context,
+    job: Job,
+    hist: dict[str, Any] | None,
+    device: Device,
+    status: PrinterStatus,
+    src: str,
 ) -> None:
+    """job_file / layer / job_id from the live status and Moonraker's history."""
+    if job.active:
+        ctx.put("job_file", job.filename, src)
+        ctx.put("layer", job.layer, f"{src}: current layer")
+        if (
+            hist
+            and hist.get("status") == "in_progress"
+            and hist.get("filename") == job.filename
+        ):
+            ctx.put(
+                "job_id",
+                str(hist.get("job_id")),
+                f"{device.name} Moonraker history (in-progress job)",
+            )
+        return
+    last = hist.get("filename") if hist else job.filename
+    if not last:
+        return
+    ctx.put("job_file", last, f"{src}: the last job (printer is {status.state})")
+    if hist:
+        ctx.put(
+            "job_id",
+            str(hist.get("job_id")),
+            f"{device.name} Moonraker history (last job, {hist.get('status')})",
+        )
+    ctx.warnings.append(
+        f"printer is {status.state}: job = the last job, layer and G-code settings unknown"
+    )
+
+
+def _put_telemetry(ctx: Context, head: Head | None, status: PrinterStatus) -> None:
+    extruder = (
+        head.extruder
+        if head and head.extruder
+        else ("nozzle" if "nozzle" in status.temps else None)
+    )
+    if extruder and extruder in status.temps:
+        actual, target = status.temps[extruder]
+        ctx.telemetry["nozzle"] = {
+            "heater": extruder,
+            "actual": actual,
+            "target": target,
+        }
+    if "bed" in status.temps:
+        actual, target = status.temps["bed"]
+        ctx.telemetry["bed"] = {"actual": actual, "target": target}
+
+
+def _read_cursor(
+    ctx: Context, path: Path, job: Job, deadline: float | None
+) -> tuple[Cursor | None, str]:
+    """G-code machine state at the job's position; (None, "") when the printer gave no position."""
     from gcode_resume import state_at
 
+    if job.file_position is not None:
+        return (
+            state_at(path, byte=job.file_position, deadline=deadline),
+            f"at byte {job.file_position} (printer file position)",
+        )
+    if job.layer is not None:
+        return state_at(
+            path, layer=job.layer, deadline=deadline
+        ), f"at the first extrusion of layer {job.layer}"
+    ctx.warnings.append(
+        "printer reports neither a file position nor a layer: G-code not read"
+    )
+    ctx.gcode = {"file": job.filename, "path": str(path), "found": True, "read": False}
+    return None, ""
+
+
+def _from_gcode(
+    ctx: Context,
+    readers: Readers,
+    device: Device,
+    fleet_printer: FleetPrinter | None,
+    job: Job,
+    head: Head | None,
+) -> None:
     assert job.filename is not None
     path, how = locate_gcode(readers, device, job.filename, job.file_size)
     if path is None:
-        ctx.warnings.append(f"G-code not available ({how}): no temperatures/speed/feature from it")
+        ctx.warnings.append(
+            f"G-code not available ({how}): no temperatures/speed/feature from it"
+        )
         ctx.gcode = {"file": job.filename, "found": False, "why": how}
         return
     deadline = readers.scan_deadline()
     try:
-        if job.file_position is not None:
-            cur = state_at(path, byte=job.file_position, deadline=deadline)
-            where = f"at byte {job.file_position} (printer file position)"
-        elif job.layer is not None:
-            cur = state_at(path, layer=job.layer, deadline=deadline)
-            where = f"at the first extrusion of layer {job.layer}"
-        else:
-            ctx.warnings.append("printer reports neither a file position nor a layer: G-code not read")
-            ctx.gcode = {"file": job.filename, "path": str(path), "found": True, "read": False}
-            return
+        cur, where = _read_cursor(ctx, path, job, deadline)
     except (OSError, ValueError) as e:
         ctx.warnings.append(f"G-code {path.name} unreadable: {e}")
-        ctx.gcode = {"file": job.filename, "path": str(path), "found": True, "error": str(e)}
+        ctx.gcode = {
+            "file": job.filename,
+            "path": str(path),
+            "found": True,
+            "error": str(e),
+        }
+        return
+    if cur is None:
         return
     st = cur.state
     tool = head.index if head is not None else st["tool"]
-    if head is not None and st["tool"] is not None and head.index != st["tool"]:
-        ctx.warnings.append(f"{head.label} is not printing at this point (active tool T{st['tool']}): its "
-                            "temperature is the G-code's standby target; speed/flow/feature are the active tool's")
-    if head is None and st["tool"] is not None and fleet_printer is not None:
-        match = next((h for h in fleet_printer.heads if h.index == st["tool"]), None)
-        if match is not None:
-            ctx.put("head", match.label, f"G-code {where}: active tool T{st['tool']}")
+    _note_head_from_gcode(ctx, fleet_printer, head, st, where)
     ctx.put("z_mm", cur.z, f"G-code {where}: ;Z: of layer {cur.layer}")
     if "layer" not in ctx.fields:
         ctx.put("layer", cur.layer or None, f"G-code {where}: ;LAYER_CHANGE count")
     apply_gcode_state(ctx, st, tool, where)
     ctx.gcode = {
-        "file": job.filename, "path": str(path), "found": True, "how": how, "line": cur.line + 1,
-        "byte": cur.byte, "gcode_layer": cur.layer, "active_tool": st["tool"],
-        "object": st["obj"], "feed_mm_min": st["f"],
+        "file": job.filename,
+        "path": str(path),
+        "found": True,
+        "how": how,
+        "line": cur.line + 1,
+        "byte": cur.byte,
+        "gcode_layer": cur.layer,
+        "active_tool": st["tool"],
+        "object": st["obj"],
+        "feed_mm_min": st["f"],
     }
     if cur.layer and job.layer and abs(cur.layer - job.layer) > 1:
-        ctx.warnings.append(f"G-code cursor is on layer {cur.layer}, the printer reports {job.layer}")
+        ctx.warnings.append(
+            f"G-code cursor is on layer {cur.layer}, the printer reports {job.layer}"
+        )
+
+
+def _note_head_from_gcode(
+    ctx: Context,
+    fleet_printer: FleetPrinter | None,
+    head: Head | None,
+    st: Mapping[str, Any],
+    where: str,
+) -> None:
+    """Warn when the reported head is not the G-code's active tool; infer the head when none was given."""
+    if head is not None and st["tool"] is not None and head.index != st["tool"]:
+        ctx.warnings.append(
+            f"{head.label} is not printing at this point (active tool T{st['tool']}): its "
+            "temperature is the G-code's standby target; speed/flow/feature are the active tool's"
+        )
+    if head is None and st["tool"] is not None and fleet_printer is not None:
+        match = next((h for h in fleet_printer.heads if h.index == st["tool"]), None)
+        if match is not None:
+            ctx.put("head", match.label, f"G-code {where}: active tool T{st['tool']}")
 
 
 def _from_spool(
@@ -424,24 +615,12 @@ def _from_spool(
 ) -> None:
     if spoolman is None:
         if spool_id is not None or head:
-            ctx.warnings.append("Spoolman is not configured: spool/filament/lot unknown")
+            ctx.warnings.append(
+                "Spoolman is not configured: spool/filament/lot unknown"
+            )
         return
-    spool: Mapping[str, Any] | None = None
     try:
-        if spool_id is not None:
-            spool = spoolman.get("spool", spool_id)
-            source = "reported spool_id"
-        elif printer and head:
-            from printops.spools import slot_of
-
-            key = f"{printer}/{head}"
-            bound = [sp for sp in spoolman.find("spool") if slot_of(sp) == key]
-            if len(bound) == 1:
-                spool, source = bound[0], f"Spoolman: the spool bound to {key}"
-            elif bound:
-                ctx.warnings.append(f"{len(bound)} spools claim {key}: spool not chosen")
-            else:
-                ctx.warnings.append(f"no spool bound to {key} in PrintOps (3d printops spool load)")
+        spool, source = _pick_spool(ctx, spoolman, printer, head, spool_id)
     except SpoolmanError as e:
         ctx.warnings.append(f"Spoolman unreadable: {e.message}")
         return
@@ -452,7 +631,40 @@ def _from_spool(
     _from_drying(ctx, conn, spoolman, int(spool["id"]), readers)
 
 
-def _from_drying(ctx: Context, conn: sqlite3.Connection, spoolman: Spoolman, spool_id: int, readers: Readers) -> None:
+def _pick_spool(
+    ctx: Context,
+    spoolman: Spoolman,
+    printer: str | None,
+    head: str | None,
+    spool_id: int | None,
+) -> tuple[Mapping[str, Any] | None, str]:
+    """The spool to snapshot and where it came from; (None, "") when none is chosen."""
+    if spool_id is not None:
+        return spoolman.get("spool", spool_id), "reported spool_id"
+    if not (printer and head):
+        return None, ""
+    from printops.spools import slot_of
+
+    key = f"{printer}/{head}"
+    bound = [sp for sp in spoolman.find("spool") if slot_of(sp) == key]
+    if len(bound) == 1:
+        return bound[0], f"Spoolman: the spool bound to {key}"
+    if bound:
+        ctx.warnings.append(f"{len(bound)} spools claim {key}: spool not chosen")
+    else:
+        ctx.warnings.append(
+            f"no spool bound to {key} in PrintOps (3d printops spool load)"
+        )
+    return None, ""
+
+
+def _from_drying(
+    ctx: Context,
+    conn: sqlite3.Connection,
+    spoolman: Spoolman,
+    spool_id: int,
+    readers: Readers,
+) -> None:
     from printops import drying, policy
 
     try:
@@ -461,19 +673,35 @@ def _from_drying(ctx: Context, conn: sqlite3.Connection, spoolman: Spoolman, spo
         ctx.warnings.append(f"drying policy unusable, drying state unknown: {e}")
         return
     try:
-        found = drying.assess_all(conn, spoolman, pol, humidity=readers.humidity, spool_ids=[spool_id])
+        found = drying.assess_all(
+            conn, spoolman, pol, humidity=readers.humidity, spool_ids=[spool_id]
+        )
     except SpoolmanError as e:
         ctx.warnings.append(f"drying state unknown: {e.message}")
         return
     if not found:
         return
     a = found[0]
-    ctx.drying = {"state": a.state, "clock": a.clock, "since": a.since, "age_days": a.age_days,
-                  "rh": a.rh, "rh_entity": a.rh_entity, "location": a.location, "notes": a.notes}
+    ctx.drying = {
+        "state": a.state,
+        "clock": a.clock,
+        "since": a.since,
+        "age_days": a.age_days,
+        "rh": a.rh,
+        "rh_entity": a.rh_entity,
+        "location": a.location,
+        "notes": a.notes,
+    }
     if a.clock == "dried":
         ctx.put("days_since_dried", a.age_days, f"Spoolman last_dried_at ({a.since})")
     elif a.clock == "opened":
-        ctx.warnings.append(f"spool #{spool_id} has not been dried since it was opened {a.age_days:g} d ago")
+        ctx.warnings.append(
+            f"spool #{spool_id} has not been dried since it was opened {a.age_days:g} d ago"
+        )
     else:
-        ctx.warnings.append(f"spool #{spool_id}: no last_dried_at / opened_at in Spoolman")
-    ctx.put("dry_box_rh", a.rh, f"Home Assistant {a.rh_entity} (humidity sensor of {a.location})")
+        ctx.warnings.append(f"spool #{spool_id}: no last_dried_at / first_used in Spoolman")
+    ctx.put(
+        "dry_box_rh",
+        a.rh,
+        f"Home Assistant {a.rh_entity} (humidity sensor of {a.location})",
+    )

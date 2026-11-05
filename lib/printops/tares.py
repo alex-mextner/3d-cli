@@ -8,8 +8,10 @@ THE CHAIN for one spool, first hit wins (each step has a source and ± grams):
   1. `spool_tare_choice` — the tare 3d-api itself wrote into Spoolman spool.spool_weight, with
      the provenance it had then (only while Spoolman still holds that value);
   2. Spoolman spool.spool_weight set by someone else (Spoolman UI) — unsourced, ±UNSOURCED_SIGMA;
-  3. Spoolman filament.spool_weight, then vendor extra `spool_tare_g`, then vendor
-     empty_spool_weight — the user's Spoolman data, ±UNSOURCED_SIGMA;
+  3. Spoolman filament.spool_weight, then vendor `empty_spool_weight` — Spoolman's native
+     empty-spool-weight fields, the same chain Spoolman's own /measure resolves (spool >
+     filament > vendor), ±UNSOURCED_SIGMA. The old vendor extra `spool_tare_g` is NOT read any
+     more: `3d printops fields migrate-native` moves its values into `empty_spool_weight`;
   4. the tare DB (`spool_tare`, migration 0050: SpoolmanDB seed + `tare add`): rows of the
      spool's vendor, narrowed by spool kind (vendor extra `spool_kind`) and nominal net
      (filament.weight) when that keeps any row; used only if the remaining rows agree on one
@@ -179,6 +181,29 @@ def add_tare(
     )
 
 
+def _narrow(
+    rows: list[TareRow], spool_kind: str | None, net_g: float | None
+) -> list[TareRow]:
+    """Prefer rows matching the spool kind, then the net weight; a filter that matches nothing is skipped."""
+    for narrow in (
+        lambda r: r.spool_kind == spool_kind if spool_kind else True,
+        lambda r: r.net_g == net_g if net_g else True,
+    ):
+        kept = [r for r in rows if narrow(r)]
+        rows = kept or rows
+    return rows
+
+
+def _ambiguity(vendor: str, rows: list[TareRow]) -> str:
+    listing = ", ".join(
+        f"{r.tare_g:g} g ({r.spool_kind or 'kind ?'}, net {r.net_g or '?'})"
+        for r in rows
+    )
+    return (
+        f"ambiguous tare for {vendor!r}: {listing}; give the spool kind/net or --tare"
+    )
+
+
 def lookup(
     conn: sqlite3.Connection,
     vendor: str,
@@ -190,26 +215,13 @@ def lookup(
     rows = list_tares(conn, vendor)
     if not rows:
         return Resolution(None, [], f"no tare known for vendor {vendor!r}")
-    for narrow in (
-        lambda r: r.spool_kind == spool_kind if spool_kind else True,
-        lambda r: r.net_g == net_g if net_g else True,
-    ):
-        kept = [r for r in rows if narrow(r)]
-        rows = kept or rows
+    rows = _narrow(rows, spool_kind, net_g)
     # Our own weighings beat a catalogue: if any row was measured here (sigma ≤ MEASURED_SIGMA), use those.
     measured = [r for r in rows if r.sigma_g <= MEASURED_SIGMA]
     rows = measured or rows
     values = sorted({r.tare_g for r in rows})
     if values[-1] - values[0] > AGREE_WITHIN_G:
-        listing = ", ".join(
-            f"{r.tare_g:g} g ({r.spool_kind or 'kind ?'}, net {r.net_g or '?'})"
-            for r in rows
-        )
-        return Resolution(
-            None,
-            rows,
-            f"ambiguous tare for {vendor!r}: {listing}; give the spool kind/net or --tare",
-        )
+        return Resolution(None, rows, _ambiguity(vendor, rows))
     best = min(rows, key=lambda r: (r.sigma_g, -r.id))
     return Resolution(
         Tare(best.tare_g, best.sigma_g, best.source, "db", best.id), rows, ""
@@ -284,16 +296,6 @@ def resolve_new(
             )
         )
     extra = vendor.get("extra") or {}
-    vendor_tare = decode_extra(extra.get("spool_tare_g"))
-    if vendor_tare:
-        return Resolution(
-            Tare(
-                float(vendor_tare),
-                UNSOURCED_SIGMA,
-                "Spoolman vendor spool_tare_g",
-                "vendor",
-            )
-        )
     if vendor.get("empty_spool_weight"):
         return Resolution(
             Tare(
@@ -311,3 +313,4 @@ def resolve_new(
     return lookup(
         conn, str(vendor["name"]), spool_kind=kind, net_g=filament.get("weight")
     )
+

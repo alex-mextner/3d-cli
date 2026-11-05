@@ -1,7 +1,7 @@
 """reconcile.py — compare what printers report in their slots with the spools bound there (plan §5.3).
 
-WHAT: `bindings(spools)` reads the Spoolman spools whose extra `printops_slot` names a slot
-  ("u1/T3"); `compare_printer` / `compare_unknown` turn a printer `Reading` (printops.slots) plus
+WHAT: `bindings(spools)` reads the Spoolman spools whose native `location` is `slot:<printer>/<head>`
+  (slot "u1/T3"); `compare_printer` / `compare_unknown` turn a printer `Reading` (printops.slots) plus
   those bindings into `Finding`s; `sync` keeps the `anomaly` table (migration 0030) in step with
   the findings of one scope and emits the events; `Reconciler` ties it to the fleet, Spoolman, the
   latest readings and the DB (used by the 3d-api poller and routes_reconcile.py).
@@ -11,15 +11,13 @@ KINDS (evidence in anomaly.evidence):
     type_mismatch      printer material ≠ bound spool's filament.material (case/space-insensitive)
     color_mismatch     CIEDE2000(printer colour, spool colour) > max_delta_e (spool colour =
                        filament extra `measured_hex`, else color_hex / multi_color_hexes, nearest)
-    tag_mismatch       the slot read an RFID UID that is not in the bound spool's `tag_uids`
+    tag_mismatch       the slot read an RFID UID that is not among the bound spool's native Spoolman tags
     empty_with_spool   the printer says the slot is empty, a spool is bound to it
     unbound_filament   the printer says filament is loaded, no spool is bound to it
   binding — from Spoolman alone:
     multiple_spools    two or more spools bound to one slot
     unusable_head      a spool bound to a head the fleet marks usable: false
-    unknown_slot       printops_slot names a printer or head that is not in the fleet
-    location_conflict  the spool's Spoolman location is set and is not this slot ("slot:u1/T3"),
-                       i.e. the spool is in two places at once
+    unknown_slot       the spool's `slot:` location names a printer or head that is not in the fleet
   write — from the event log (printops.head_sync, #400):
     printer_write_failed  the latest write of a slot (`slot.printer_written` /
                        `slot.printer_write_failed`) failed for the spool still bound there. The
@@ -54,10 +52,11 @@ from typing import Any
 from printops import events as ev
 from printops.color import hex_delta_e, parse_hex
 from printops.db import open_db, transaction, utc_now
-from printops.fleet import Fleet, FleetPrinter
+from printops.fleet import Fleet, FleetPrinter, Head
 from printops.head_sync import ACTIVE_STAGE
 from printops.slots import LiveSlot, Reading
-from printops.spoolman import Spoolman, decode_extra
+from printops.spool_mirror import slot_of_location
+from printops.spoolman import Spoolman, decode_extra, normalize_uid
 
 log = logging.getLogger("printops.reconcile")
 
@@ -73,11 +72,13 @@ BINDING_KINDS = (
     "multiple_spools",
     "unusable_head",
     "unknown_slot",
-    "location_conflict",
 )
 WRITE_KINDS = ("printer_write_failed",)
 KINDS = LIVE_KINDS + BINDING_KINDS + WRITE_KINDS
-WRITE_EVENTS = ("slot.printer_written", "slot.printer_write_failed")  # printops.head_sync
+WRITE_EVENTS = (
+    "slot.printer_written",
+    "slot.printer_write_failed",
+)  # printops.head_sync
 SLOT_MISMATCH_KINDS = frozenset((*LIVE_KINDS, "multiple_spools"))
 STATUSES = ("open", "ack", "resolved")
 FLEET_SCOPE = "fleet"
@@ -118,16 +119,6 @@ def _extra(obj: Mapping[str, Any], key: str) -> Any:
         return None
 
 
-def _tag_uids(value: Any) -> tuple[str, ...]:
-    """Spool extra `tag_uids`: a text field holding a JSON list ('["04A1..."]'); anything else → ()."""
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return ()
-    return tuple(str(t) for t in value) if isinstance(value, list) else ()
-
-
 def _spool_name(spool: Mapping[str, Any]) -> str:
     fil = spool.get("filament") or {}
     vendor = (fil.get("vendor") or {}).get("name")
@@ -137,14 +128,7 @@ def _spool_name(spool: Mapping[str, Any]) -> str:
     )
 
 
-def binding_of(spool: Mapping[str, Any]) -> Binding | None:
-    """The slot binding of one Spoolman spool, or None when `printops_slot` is unset/empty."""
-    slot = _extra(spool, "printops_slot")
-    if not isinstance(slot, str) or not slot.strip():
-        return None
-    slot = slot.strip()
-    printer, _, head = slot.partition("/")
-    fil = spool.get("filament") or {}
+def _binding_colors(fil: Mapping[str, Any]) -> tuple[str, ...]:
     # A measured colour (what the spool really looks like) replaces the catalogue colour(s).
     measured = _extra(fil, "measured_hex")
     colors = (
@@ -152,7 +136,17 @@ def binding_of(spool: Mapping[str, Any]) -> Binding | None:
         if parse_hex(measured)
         else [fil.get("color_hex"), *str(fil.get("multi_color_hexes") or "").split(",")]
     )
-    tags = _tag_uids(_extra(spool, "tag_uids"))
+    return tuple(dict.fromkeys(c for c in (parse_hex(x) for x in colors) if c))
+
+
+def binding_of(spool: Mapping[str, Any]) -> Binding | None:
+    """The slot binding of one Spoolman spool, or None when its `location` is not `slot:<p>/<head>`."""
+    slot = slot_of_location(str(spool.get("location") or ""))
+    if not slot:
+        return None
+    printer, _, head = slot.partition("/")
+    fil = spool.get("filament") or {}
+    tags = tuple(dict.fromkeys(normalize_uid(str(t["uid"])) for t in spool.get("tags") or [] if t.get("uid")))
     remaining = spool.get("remaining_weight")
     return Binding(
         spool_id=int(spool["id"]),
@@ -161,7 +155,7 @@ def binding_of(spool: Mapping[str, Any]) -> Binding | None:
         head=head,
         name=_spool_name(spool),
         material=fil.get("material") or None,
-        colors=tuple(dict.fromkeys(c for c in (parse_hex(x) for x in colors) if c)),
+        colors=_binding_colors(fil),
         tag_uids=tags,
         location=spool.get("location") or None,
         remaining_g=float(remaining) if isinstance(remaining, (int, float)) else None,
@@ -212,7 +206,13 @@ def write_failures(conn: sqlite3.Connection) -> dict[str, WriteFailure]:
         slot = str(row["subject"]).removeprefix("slot:")
         stage = str(p.get("stage") or "filament")
         out[active_key(slot) if stage == ACTIVE_STAGE else slot] = WriteFailure(
-            slot, int(p.get("spool_id") or 0), str(p.get("error") or ""), stage, str(row["at"]), int(row["id"]))
+            slot,
+            int(p.get("spool_id") or 0),
+            str(p.get("error") or ""),
+            stage,
+            str(row["at"]),
+            int(row["id"]),
+        )
     return out
 
 
@@ -236,10 +236,235 @@ class Finding:
 def _head_matches(live: LiveSlot | None, b: Binding, max_delta_e: float) -> bool:
     """The printer shows the bound spool's material and colour on this head."""
     return bool(
-        live is not None and live.material and b.material and live.color and b.colors
+        live is not None
+        and live.material
+        and b.material
+        and live.color
+        and b.colors
         and _norm_material(live.material) == _norm_material(b.material)
         and min(hex_delta_e(live.color, c) for c in b.colors) <= max_delta_e
     )
+
+
+def _finding(
+    printer_name: str,
+    kind: str,
+    subject: str,
+    evidence: dict[str, Any],
+    *identity: object,
+) -> Finding:
+    return Finding(
+        kind, printer_name, subject, evidence, tuple(str(i) for i in identity)
+    )
+
+
+def _binding_findings(
+    printer: FleetPrinter, heads: Mapping[str, Head], mine: Sequence[Binding]
+) -> list[Finding]:
+    """Bindings to heads that do not exist / are unusable, and spools whose location disagrees."""
+    out: list[Finding] = []
+    for b in mine:
+        head = heads.get(b.head)
+        if head is None:
+            out.append(
+                _finding(
+                    printer.name,
+                    "unknown_slot",
+                    f"spool:{b.spool_id}",
+                    {
+                        "spool": b.to_dict(),
+                        "printer": printer.name,
+                        "known_heads": sorted(heads),
+                        "why": f"{printer.name} has no head {b.head!r}",
+                    },
+                    b.slot,
+                )
+            )
+        elif not head.usable:
+            out.append(
+                _finding(
+                    printer.name,
+                    "unusable_head",
+                    f"slot:{b.slot}",
+                    {"spool": b.to_dict(), "reason": head.reason},
+                    b.spool_id,
+                )
+            )
+        if b.location and b.location != f"slot:{b.slot}":
+            out.append(
+                _finding(
+                    printer.name,
+                    "location_conflict",
+                    f"spool:{b.spool_id}",
+                    {
+                        "spool": b.to_dict(),
+                        "printops_slot": b.slot,
+                        "location": b.location,
+                    },
+                    b.slot,
+                    b.location,
+                )
+            )
+    return out
+
+
+def _write_failure_findings(
+    printer: FleetPrinter,
+    mine: Sequence[Binding],
+    live_by_head: Mapping[str, LiveSlot],
+    failures: Mapping[str, WriteFailure],
+    max_delta_e: float,
+) -> list[Finding]:
+    out: list[Finding] = []
+    for b in mine:
+        for key in (
+            b.slot,
+            active_key(b.slot),
+        ):  # the head's write, then Moonraker's active spool
+            f = failures.get(key)
+            if f is None or f.spool_id != b.spool_id:
+                continue
+            if f.stage == "filament" and _head_matches(
+                live_by_head.get(b.head), b, max_delta_e
+            ):
+                continue
+            out.append(
+                _finding(
+                    printer.name,
+                    "printer_write_failed",
+                    f"slot:{b.slot}",
+                    {
+                        "spool": b.to_dict(),
+                        "error": f.error,
+                        "stage": f.stage,
+                        "at": f.at,
+                        "event_id": f.event_id,
+                    },
+                    b.spool_id,
+                    # a head failure keeps its old identity
+                    *((f.stage,) if f.stage == ACTIVE_STAGE else ()),
+                )
+            )
+    return out
+
+
+def _mismatch_findings(
+    printer_name: str,
+    subject: str,
+    seen: dict[str, Any],
+    live: LiveSlot,
+    b: Binding,
+    max_delta_e: float,
+) -> list[Finding]:
+    """Material / colour / tag disagreements between one live slot and its single bound spool."""
+    out: list[Finding] = []
+    if (
+        live.material
+        and b.material
+        and _norm_material(live.material) != _norm_material(b.material)
+    ):
+        out.append(
+            _finding(
+                printer_name,
+                "type_mismatch",
+                subject,
+                {"printer": seen, "spool": b.to_dict()},
+                b.spool_id,
+                _norm_material(live.material),
+            )
+        )
+    if live.color and b.colors:
+        de = min(hex_delta_e(live.color, c) for c in b.colors)
+        if de > max_delta_e:
+            out.append(
+                _finding(
+                    printer_name,
+                    "color_mismatch",
+                    subject,
+                    {
+                        "printer": seen,
+                        "spool": b.to_dict(),
+                        "delta_e2000": round(de, 2),
+                        "max_delta_e": max_delta_e,
+                    },
+                    b.spool_id,
+                    live.color,
+                )
+            )
+    if live.tag_uid and b.tag_uids and normalize_uid(live.tag_uid) not in b.tag_uids:
+        out.append(
+            _finding(
+                printer_name,
+                "tag_mismatch",
+                subject,
+                {"printer": seen, "spool": b.to_dict()},
+                b.spool_id,
+                live.tag_uid,
+            )
+        )
+    return out
+
+
+def _live_slot_findings(
+    printer: FleetPrinter,
+    live: LiveSlot,
+    bs: Sequence[Binding],
+    max_delta_e: float,
+) -> list[Finding]:
+    """Findings for one slot the printer reported, against the spools bound to it."""
+    subject = f"slot:{printer.name}/{live.head}"
+    seen = {
+        "present": live.present,
+        "material": live.material,
+        "color": live.color,
+        "vendor": live.vendor,
+        "sub_type": live.sub_type,
+        "tag_uid": live.tag_uid,
+    }
+    if live.present is False:
+        return [
+            _finding(
+                printer.name,
+                "empty_with_spool",
+                subject,
+                {"printer": seen, "spool": b.to_dict()},
+                b.spool_id,
+            )
+            for b in bs
+        ]
+    if live.present and not bs:
+        return [
+            _finding(
+                printer.name,
+                "unbound_filament",
+                subject,
+                {"printer": seen},
+                live.material or "?",
+                live.color or "?",
+                live.tag_uid or "",
+            )
+        ]
+    if len(bs) != 1:
+        return []
+    return _mismatch_findings(printer.name, subject, seen, live, bs[0], max_delta_e)
+
+
+def _multiple_spool_findings(
+    printer: FleetPrinter,
+    heads: Mapping[str, Head],
+    by_head: Mapping[str, Sequence[Binding]],
+) -> list[Finding]:
+    return [
+        _finding(
+            printer.name,
+            "multiple_spools",
+            f"slot:{printer.name}/{label}",
+            {"spools": [b.to_dict() for b in bs]},
+            *sorted(b.spool_id for b in bs),
+        )
+        for label, bs in by_head.items()
+        if label in heads and len(bs) > 1
+    ]
 
 
 def compare_printer(
@@ -256,143 +481,19 @@ def compare_printer(
     by_head: dict[str, list[Binding]] = {}
     for b in mine:
         by_head.setdefault(b.head, []).append(b)
-    out: list[Finding] = []
-
-    def add(
-        kind: str, subject: str, evidence: dict[str, Any], *identity: object
-    ) -> None:
-        out.append(
-            Finding(
-                kind, printer.name, subject, evidence, tuple(str(i) for i in identity)
-            )
-        )
-
-    for b in mine:
-        head = heads.get(b.head)
-        if head is None:
-            add(
-                "unknown_slot",
-                f"spool:{b.spool_id}",
-                {
-                    "spool": b.to_dict(),
-                    "printer": printer.name,
-                    "known_heads": sorted(heads),
-                    "why": f"{printer.name} has no head {b.head!r}",
-                },
-                b.slot,
-            )
-        elif not head.usable:
-            add(
-                "unusable_head",
-                f"slot:{b.slot}",
-                {"spool": b.to_dict(), "reason": head.reason},
-                b.spool_id,
-            )
-        if b.location and b.location != f"slot:{b.slot}":
-            add(
-                "location_conflict",
-                f"spool:{b.spool_id}",
-                {"spool": b.to_dict(), "printops_slot": b.slot, "location": b.location},
-                b.slot,
-                b.location,
-            )
-    for label, bs in by_head.items():
-        if label in heads and len(bs) > 1:
-            add(
-                "multiple_spools",
-                f"slot:{printer.name}/{label}",
-                {"spools": [b.to_dict() for b in bs]},
-                *sorted(b.spool_id for b in bs),
-            )
-    live_ok = reading is not None and reading.ok
-    live_by_head = {s.head: s for s in reading.slots} if reading is not None and live_ok else {}
-    for b in mine:
-        for key in (b.slot, active_key(b.slot)):  # the head's write, then Moonraker's active spool
-            f = (failures or {}).get(key)
-            if f is None or f.spool_id != b.spool_id:
-                continue
-            if f.stage == "filament" and _head_matches(live_by_head.get(b.head), b, max_delta_e):
-                continue
-            add(
-                "printer_write_failed",
-                f"slot:{b.slot}",
-                {"spool": b.to_dict(), "error": f.error, "stage": f.stage, "at": f.at, "event_id": f.event_id},
-                b.spool_id,
-                *((f.stage,) if f.stage == ACTIVE_STAGE else ()),  # a head failure keeps its old identity
-            )
+    out = _binding_findings(printer, heads, mine)
+    out += _multiple_spool_findings(printer, heads, by_head)
+    live_by_head = {s.head: s for s in reading.slots} if reading and reading.ok else {}
+    out += _write_failure_findings(
+        printer, mine, live_by_head, failures or {}, max_delta_e
+    )
 
     if reading is None or not reading.ok:
         return out
     for live in reading.slots:
-        if live.head not in heads:
-            continue
-        slot = f"{printer.name}/{live.head}"
-        subject = f"slot:{slot}"
-        bs = by_head.get(live.head, [])
-        seen = {
-            "present": live.present,
-            "material": live.material,
-            "color": live.color,
-            "vendor": live.vendor,
-            "sub_type": live.sub_type,
-            "tag_uid": live.tag_uid,
-        }
-        if live.present is False:
-            for b in bs:
-                add(
-                    "empty_with_spool",
-                    subject,
-                    {"printer": seen, "spool": b.to_dict()},
-                    b.spool_id,
-                )
-            continue
-        if live.present and not bs:
-            add(
-                "unbound_filament",
-                subject,
-                {"printer": seen},
-                live.material or "?",
-                live.color or "?",
-                live.tag_uid or "",
-            )
-            continue
-        if len(bs) != 1:
-            continue
-        b = bs[0]
-        if (
-            live.material
-            and b.material
-            and _norm_material(live.material) != _norm_material(b.material)
-        ):
-            add(
-                "type_mismatch",
-                subject,
-                {"printer": seen, "spool": b.to_dict()},
-                b.spool_id,
-                _norm_material(live.material),
-            )
-        if live.color and b.colors:
-            de = min(hex_delta_e(live.color, c) for c in b.colors)
-            if de > max_delta_e:
-                add(
-                    "color_mismatch",
-                    subject,
-                    {
-                        "printer": seen,
-                        "spool": b.to_dict(),
-                        "delta_e2000": round(de, 2),
-                        "max_delta_e": max_delta_e,
-                    },
-                    b.spool_id,
-                    live.color,
-                )
-        if live.tag_uid and b.tag_uids and live.tag_uid not in b.tag_uids:
-            add(
-                "tag_mismatch",
-                subject,
-                {"printer": seen, "spool": b.to_dict()},
-                b.spool_id,
-                live.tag_uid,
+        if live.head in heads:
+            out += _live_slot_findings(
+                printer, live, by_head.get(live.head, []), max_delta_e
             )
     return out
 
@@ -649,7 +750,9 @@ class Reconciler:
             scopes: list[tuple[str, list[Finding], bool]] = []
             for name, printer in self.printers.items():
                 reading = readings.get(name)
-                findings = compare_printer(printer, reading, binds, self.max_delta_e, failures)
+                findings = compare_printer(
+                    printer, reading, binds, self.max_delta_e, failures
+                )
                 scopes.append((name, findings, reading is not None and reading.ok))
             scopes.append((FLEET_SCOPE, compare_unknown(self.fleet, binds), True))
             now = utc_now()

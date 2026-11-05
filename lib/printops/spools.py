@@ -4,10 +4,11 @@ ACCESSED VIA: 3d-api `routes_spools.py` (the only caller that writes; 3d-api is 
 Spoolman writer, plan §5.1) and therefore `3d printops spool …`, the bot and HA. Issues #160/#163.
 
 WHERE THINGS LIVE (decision D2): vendor / filament / spool identity, remaining weight, lot,
-price, Spoolman `location` (+ extra `printops_location_id`, written only through
-`printops.locations.place_spool`), extra `printops_slot` ("u1/T3", "" when not loaded),
-`opened_at`, `external_key` (import idempotency) — in Spoolman. The ledger (interval of
-remaining), the tare provenance and the events — in the PrintOps DB.
+price, Spoolman `location` (written only through `printops.locations.place_spool`; a spool
+loaded in slot u1/T3 has location `slot:u1/T3` — there is no separate slot field), native
+`first_used` (the opened/exposure clock), extra `external_key` (import idempotency) — in
+Spoolman. The ledger (interval of remaining), the tare provenance and the events — in the
+PrintOps DB. docs/printops/native-fields.md lists what is native and why.
 
 INVARIANTS:
   - A spool sits in at most one printer slot and a slot holds at most one spool: `load` refuses
@@ -33,11 +34,15 @@ import re
 import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
-from printops import db, head_sync, ledger, locations, maintenance, tares
+from printops import db, filament_defaults, head_sync, ledger, locations, maintenance, tares
 from printops import events as ev
+from printops.spool_mirror import slot_of_location
 from printops.spoolman import JSON, Spoolman, SpoolmanError, decode_extra, encode_extra
+
+if TYPE_CHECKING:
+    from printops.fleet import Head
 
 # Densities (g/cm³) Spoolman needs to create a filament when the caller gives none: SpoolmanDB
 # material defaults (Spoolman 0.27.0 GET /api/v1/external/material, read 2026-10-14).
@@ -113,7 +118,8 @@ def extra_value(item: Mapping[str, Any], key: str) -> Any:
 
 
 def slot_of(spool: Mapping[str, Any]) -> str:
-    return str(extra_value(spool, "printops_slot") or "")
+    """`u1/T3` when the spool's `location` is `slot:u1/T3`, else ''."""
+    return slot_of_location(str(spool.get("location") or ""))
 
 
 # The Spoolman extra field (on the spool and on its filament) naming the slicer filament preset.
@@ -157,11 +163,10 @@ def view(conn: sqlite3.Connection, spool: Mapping[str, Any]) -> dict[str, Any]:
         "color_hex": fil.get("color_hex"),
         "filament_id": fil.get("id"),
         "location": spool.get("location") or None,
-        "location_id": extra_value(spool, "printops_location_id"),
         "slot": slot_of(spool) or None,
         "lot_nr": spool.get("lot_nr"),
         "price": spool.get("price"),
-        "opened_at": extra_value(spool, "opened_at"),
+        "opened_at": spool.get("first_used"),
         "external_key": extra_value(spool, "external_key"),
         "slicer_filament_preset": named[0] if named else None,
         "archived": bool(spool.get("archived")),
@@ -189,6 +194,26 @@ def _num(v: Any) -> float | None:
     return None if v is None else float(v)
 
 
+def _matches_filters(
+    v: Mapping[str, Any],
+    *,
+    material: str | None,
+    color: str | None,
+    location: str | None,
+    vendor: str | None,
+    loaded: bool | None,
+) -> bool:
+    if material and not _ci(v["material"], material):
+        return False
+    if vendor and not _ci(v["vendor"], vendor):
+        return False
+    if color and not _color_matches(v, color):
+        return False
+    if location and not _under(str(v["location"] or ""), location):
+        return False
+    return loaded is None or bool(v["slot"]) == loaded
+
+
 def list_spools(
     ctx: Ctx,
     *,
@@ -199,21 +224,19 @@ def list_spools(
     loaded: bool | None = None,
     archived: bool = False,
 ) -> list[dict[str, Any]]:
-    out = []
-    for sp in all_spools(ctx.spoolman, archived=archived):
-        v = view(ctx.conn, sp)
-        if material and not _ci(v["material"], material):
-            continue
-        if vendor and not _ci(v["vendor"], vendor):
-            continue
-        if color and not _color_matches(v, color):
-            continue
-        if location and not _under(str(v["location"] or ""), location):
-            continue
-        if loaded is not None and bool(v["slot"]) != loaded:
-            continue
-        out.append(v)
-    return out
+    views = (view(ctx.conn, sp) for sp in all_spools(ctx.spoolman, archived=archived))
+    return [
+        v
+        for v in views
+        if _matches_filters(
+            v,
+            material=material,
+            color=color,
+            location=location,
+            vendor=vendor,
+            loaded=loaded,
+        )
+    ]
 
 
 def _under(path: str, prefix: str) -> bool:
@@ -269,6 +292,7 @@ class Receive:
     opened: bool = False
     comment: str | None = None
     external_key: str | None = None
+    max_speed_mm_s: int | None = None  # filament max print speed, mm/s (default: filament_defaults)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Receive:
@@ -304,6 +328,8 @@ class Receive:
             v = getattr(self, name)
             if v is not None and (not math.isfinite(v) or v < 0):
                 raise SpoolError(422, f"{name} must be a finite number ≥ 0, got {v}")
+        if self.max_speed_mm_s is not None and self.max_speed_mm_s <= 0:
+            raise SpoolError(422, f"max_speed_mm_s must be > 0 mm/s, got {self.max_speed_mm_s}")
         for name in ("density", "diameter"):
             v = getattr(self, name)
             if v is not None and (not math.isfinite(v) or v <= 0):
@@ -324,6 +350,7 @@ def _matches_type(v: Any, want: type | tuple[type, ...]) -> bool:
 _NUMBER = (int, float)
 _RECEIVE_TYPES: dict[str, type | tuple[type, ...]] = {
     "filament_id": int,
+    "max_speed_mm_s": int,
     "opened": bool,
     **dict.fromkeys(
         (
@@ -413,7 +440,78 @@ def _resolve_filament(ctx: Ctx, r: Receive) -> tuple[JSON, bool]:
     body = {k: v for k, v in spec.items() if v is not None}
     if vendor is not None:
         body["vendor_id"] = vendor["id"]
+    body["extra"] = filament_defaults.creation_extra(spec, r.max_speed_mm_s)
     return sm.create("filament", body), True
+
+
+def _receive_tare(ctx: Ctx, r: Receive, fil: JSON) -> tares.Tare | None:
+    if r.tare_g is None:
+        return tares.resolve_new(ctx.conn, fil, spool_kind=r.spool_kind).tare
+    return tares.Tare(
+        r.tare_g,
+        GIVEN_TARE_SIGMA if not r.tare_source else tares.MEASURED_SIGMA,
+        r.tare_source or "given at receive",
+        "given",
+    )
+
+
+def _receive_body(
+    r: Receive,
+    fil: JSON,
+    net: float | None,
+    tare: tares.Tare | None,
+    loc: locations.Location | None,
+) -> dict[str, Any]:
+    extra: dict[str, Any] = {}
+    if r.external_key:
+        extra["external_key"] = r.external_key
+    body: dict[str, Any] = {
+        "filament_id": fil["id"],
+        "extra": {k: encode_extra(v) for k, v in extra.items()},
+    }
+    if r.opened:
+        body["first_used"] = db.utc_now()
+    if loc is not None:
+        body["location"] = locations.spoolman_path(loc)
+    if net is not None:
+        body["initial_weight"] = net
+    if r.remaining_g is not None:
+        body["initial_weight"] = max(net or 0.0, r.remaining_g)
+        body["remaining_weight"] = r.remaining_g
+    if tare is not None:
+        body["spool_weight"] = tare.grams
+    for k in ("lot_nr", "price", "comment"):
+        if getattr(r, k) is not None:
+            body[k] = getattr(r, k)
+    return body
+
+
+def _anchor_received(ctx: Ctx, r: Receive, sid: int, net: float | None) -> None:
+    if r.remaining_g is not None:
+        conf = r.remaining_confidence_g
+        if conf is None:
+            conf = max(
+                MANUAL_REMAINING_MIN_G, r.remaining_g * MANUAL_REMAINING_FRACTION
+            )
+        ledger.anchor(
+            ctx.conn,
+            sid,
+            r.remaining_g,
+            "manual",
+            conf,
+            actor=ctx.actor,
+            note="received part-used",
+        )
+    elif net is not None:
+        ledger.anchor(
+            ctx.conn,
+            sid,
+            net,
+            "receive",
+            r.remaining_confidence_g or ledger.receive_sigma(net),
+            actor=ctx.actor,
+            note="received sealed",
+        )
 
 
 def receive(ctx: Ctx, r: Receive) -> dict[str, Any]:
@@ -434,75 +532,16 @@ def receive(ctx: Ctx, r: Receive) -> dict[str, Any]:
         except SpoolmanError as e:
             raise SpoolError(502, e.message) from e
         net = r.net_g if r.net_g is not None else _num(fil.get("weight"))
-        if r.tare_g is not None:
-            tare: tares.Tare | None = tares.Tare(
-                r.tare_g,
-                GIVEN_TARE_SIGMA if not r.tare_source else tares.MEASURED_SIGMA,
-                r.tare_source or "given at receive",
-                "given",
-            )
-        else:
-            tare = tares.resolve_new(ctx.conn, fil, spool_kind=r.spool_kind).tare
-        extra: dict[str, Any] = {}
-        if r.opened:
-            extra["opened_at"] = db.utc_now()
-        if r.external_key:
-            extra["external_key"] = r.external_key
-        if loc is not None:
-            extra["printops_location_id"] = loc.id
-        body: dict[str, Any] = {
-            "filament_id": fil["id"],
-            "extra": {k: encode_extra(v) for k, v in extra.items()},
-        }
-        if loc is not None:
-            body["location"] = locations.spoolman_path(loc)
-        if net is not None:
-            body["initial_weight"] = net
-        if r.remaining_g is not None:
-            body["initial_weight"] = max(net or 0.0, r.remaining_g)
-            body["remaining_weight"] = r.remaining_g
-        if tare is not None:
-            body["spool_weight"] = tare.grams
-        for k in ("lot_nr", "price", "comment"):
-            if getattr(r, k) is not None:
-                body[k] = getattr(r, k)
+        tare = _receive_tare(ctx, r, fil)
+        body = _receive_body(r, fil, net, tare, loc)
         try:
             spool = sm.create("spool", body)
         except SpoolmanError as e:
             raise SpoolError(502 if e.status in (0, 500) else 422, e.message) from e
         sid = int(spool["id"])
-        if r.external_key:
-            ctx.conn.execute(
-                "INSERT INTO spool_import (external_key, spool_id, at, actor) VALUES (?, ?, ?, ?)",
-                (r.external_key, sid, db.utc_now(), ctx.actor),
-            )
         if tare is not None:
             tares.record_choice(ctx.conn, sid, tare, actor=ctx.actor)
-        if r.remaining_g is not None:
-            conf = r.remaining_confidence_g
-            if conf is None:
-                conf = max(
-                    MANUAL_REMAINING_MIN_G, r.remaining_g * MANUAL_REMAINING_FRACTION
-                )
-            ledger.anchor(
-                ctx.conn,
-                sid,
-                r.remaining_g,
-                "manual",
-                conf,
-                actor=ctx.actor,
-                note="received part-used",
-            )
-        elif net is not None:
-            ledger.anchor(
-                ctx.conn,
-                sid,
-                net,
-                "receive",
-                r.remaining_confidence_g or ledger.receive_sigma(net),
-                actor=ctx.actor,
-                note="received sealed",
-            )
+        _anchor_received(ctx, r, sid, net)
         ev.emit(
             ctx.conn,
             "spool.received",
@@ -523,25 +562,16 @@ def receive(ctx: Ctx, r: Receive) -> dict[str, Any]:
 
 
 def _claim_key(ctx: Ctx, key: str) -> None:
-    """Refuse an external key that already names a spool (409). Runs inside the receive
-    transaction (BEGIN IMMEDIATE), so two concurrent imports of one key cannot both pass; a key
-    whose spool was deleted in Spoolman by hand is released."""
-    row = ctx.conn.execute(
-        "SELECT spool_id FROM spool_import WHERE external_key = ?", (key,)
-    ).fetchone()
-    if row is None:
-        return
-    sid = int(row["spool_id"])
-    try:
-        ctx.spoolman.get("spool", sid)
-    except SpoolmanError as e:
-        if e.status != 404:
-            raise SpoolError(502, e.message) from e
-        ctx.conn.execute("DELETE FROM spool_import WHERE external_key = ?", (key,))
-        return
-    raise SpoolError(
-        409, f"spool #{sid} already has external key {key!r}", detail={"spool_id": sid}
-    )
+    """Refuse an external key that already names a spool (409; archived spools count). Runs inside
+    the receive transaction (BEGIN IMMEDIATE), so two concurrent imports of one key cannot both
+    pass. Spoolman's extra `external_key` is the only record of the key."""
+    for sp in all_spools(ctx.spoolman, archived=True):
+        if extra_value(sp, "external_key") == key:
+            raise SpoolError(
+                409,
+                f"spool #{sp['id']} already has external key {key!r}",
+                detail={"spool_id": int(sp["id"])},
+            )
 
 
 # -- placement ---------------------------------------------------------------------------------
@@ -573,10 +603,13 @@ def _slot_location(ctx: Ctx, slot: SlotRef) -> locations.Location:
 
 
 def _place(
-    ctx: Ctx, spool_id: int, loc: locations.Location | None, extra: Mapping[str, Any]
+    ctx: Ctx,
+    spool_id: int,
+    loc: locations.Location | None,
+    fields: Mapping[str, Any] | None = None,
 ) -> JSON:
     try:
-        return locations.place_spool(ctx.conn, ctx.spoolman, spool_id, loc, extra=extra)
+        return locations.place_spool(ctx.conn, ctx.spoolman, spool_id, loc, fields=fields)
     except SpoolmanError as e:
         raise SpoolError(502, e.message) from e
     except ValueError as e:  # LocationError: archived location
@@ -621,11 +654,13 @@ def move(ctx: Ctx, spool_id: int, location: str) -> dict[str, Any]:
             {"from": sp.get("location"), "to": loc.path, "location_id": loc.id},
             ctx.actor,
         )
-        sp = _place(ctx, spool_id, loc, {"printops_slot": ""} if was else {})
+        sp = _place(ctx, spool_id, loc)
     return view(ctx.conn, sp)
 
 
-def set_slicer_preset(ctx: Ctx, spool_id: int, preset: str | None, *, scope: str = "spool") -> dict[str, Any]:
+def set_slicer_preset(
+    ctx: Ctx, spool_id: int, preset: str | None, *, scope: str = "spool"
+) -> dict[str, Any]:
     """Record the slicer filament preset `preset` (None clears it) on the spool, or on its Spoolman
     filament (`scope="filament"`: every spool of it) — `3d calibrate gen` reads it (#294). A blank
     name is refused: clearing is `None`, never an empty string typed by accident."""
@@ -633,19 +668,37 @@ def set_slicer_preset(ctx: Ctx, spool_id: int, preset: str | None, *, scope: str
         raise SpoolError(422, f"scope must be spool or filament, got {scope!r}")
     name = None if preset is None else preset.strip()
     if name == "" or (name is not None and _CONTROL.search(name)):
-        raise SpoolError(422, "a preset name must be non-blank and free of control characters (null clears it)")
+        raise SpoolError(
+            422,
+            "a preset name must be non-blank and free of control characters (null clears it)",
+        )
     value = encode_extra(name or "")
     with db.transaction(ctx.conn):
         sp = _live_spool(ctx, spool_id)
-        ev.emit(ctx.conn, "spool.preset_set", f"spool:{spool_id}", {"preset": name, "scope": scope}, ctx.actor)
+        ev.emit(
+            ctx.conn,
+            "spool.preset_set",
+            f"spool:{spool_id}",
+            {"preset": name, "scope": scope},
+            ctx.actor,
+        )
         try:
             if scope == "spool":
-                sp = ctx.spoolman.update("spool", spool_id, {"extra": {PRESET_FIELD: value}})
+                sp = ctx.spoolman.update(
+                    "spool", spool_id, {"extra": {PRESET_FIELD: value}}
+                )
             else:
                 fid = (sp.get("filament") or {}).get("id")
                 if fid is None:
-                    raise SpoolError(502, f"spool #{spool_id} has no filament in Spoolman")
-                sp = {**sp, "filament": ctx.spoolman.update("filament", int(fid), {"extra": {PRESET_FIELD: value}})}
+                    raise SpoolError(
+                        502, f"spool #{spool_id} has no filament in Spoolman"
+                    )
+                sp = {
+                    **sp,
+                    "filament": ctx.spoolman.update(
+                        "filament", int(fid), {"extra": {PRESET_FIELD: value}}
+                    ),
+                }
         except SpoolmanError as e:
             raise SpoolError(502, e.message) from e
     return view(ctx.conn, sp)
@@ -692,13 +745,7 @@ def check_slot(printer: str, head: str, *, usable: bool = True) -> SlotRef:
         )
     h = next((x for x in p.heads if x.label.casefold() == head.casefold()), None)
     if h is not None:
-        if usable and not h.usable:
-            raise SpoolError(
-                409,
-                f"{printer} {h.label} is not usable: {h.reason or 'marked unusable in the fleet'}",
-                detail={"printer": printer, "head": h.label, "reason": h.reason},
-            )
-        return SlotRef(printer, h.label)
+        return _usable_head(printer, h, usable)
     unit, _, n = head.partition("/")
     for ams in p.ams or ():
         if ams.id == unit and n.isdigit() and 1 <= int(n) <= ams.slots:
@@ -707,11 +754,59 @@ def check_slot(printer: str, head: str, *, usable: bool = True) -> SlotRef:
     raise SpoolError(404, f"{printer} has no slot {head!r}; heads: {heads or '-'}")
 
 
+def _usable_head(printer: str, h: Head, usable: bool) -> SlotRef:
+    if usable and not h.usable:
+        raise SpoolError(
+            409,
+            f"{printer} {h.label} is not usable: {h.reason or 'marked unusable in the fleet'}",
+            detail={"printer": printer, "head": h.label, "reason": h.reason},
+        )
+    return SlotRef(printer, h.label)
+
+
 def spool_in_slot(sm: Spoolman, slot: SlotRef) -> list[JSON]:
-    """Spools whose `printops_slot` is `slot` (case-insensitive: a slot of a printer that
+    """Spools whose `location` is `slot:<slot>` (case-insensitive: a slot of a printer that
     left the fleet cannot be canonicalised by check_slot)."""
     key = slot.key.casefold()
     return [sp for sp in all_spools(sm) if slot_of(sp).casefold() == key]
+
+
+def _refuse_open_faults(ctx: Ctx, slot: SlotRef) -> None:
+    faults = (
+        maintenance.list_faults(ctx.conn, slot.printer, head=slot.head)
+        if slot.is_head
+        else []
+    )
+    if not faults:
+        return
+    named = [
+        {
+            "id": fault["id"],
+            "symptom": maintenance.one_line(fault["symptom"], FAULT_SYMPTOM_CHARS),
+        }
+        for fault in faults[:FAULTS_NAMED]
+    ]
+    shown = "; ".join(f"#{n['id']} {n['symptom']}" for n in named)
+    more = f" (+{len(faults) - len(named)} more)" if len(faults) > len(named) else ""
+    raise SpoolError(
+        409,
+        f"{slot.key} has {len(faults)} open fault(s): {shown}{more} — close all of them before loading",
+        detail={
+            "printer": slot.printer,
+            "head": slot.head,
+            "open_faults": len(faults),
+            "faults": named,
+        },
+    )
+
+
+def _refuse_occupied(ctx: Ctx, slot: SlotRef, occupant: JSON) -> NoReturn:
+    raise SpoolError(
+        409,
+        f"{slot.key} already holds spool #{occupant['id']} ({view(ctx.conn, occupant)['name']}); "
+        "unload it first, or pass replace_to (where it goes)",
+        detail={"occupant": occupant["id"]},
+    )
 
 
 def load(
@@ -724,7 +819,7 @@ def load(
     printer_write: bool = True,
     force_official: bool = False,
 ) -> dict[str, Any]:
-    """Bind a spool to a printer slot (`printops_slot` + location `slot:<p>/<head>`), then — after
+    """Bind a spool to a printer slot (its location becomes `slot:<p>/<head>`), then — after
     the binding is committed, unless `printer_write` is False — make the printer's head show it
     (printops.head_sync; `force_official` lets it overwrite an official RFID head) and, on a
     single-head Moonraker printer with `[spoolman]`, Moonraker's active spool. The answer's
@@ -739,30 +834,12 @@ def load(
         # db.transaction is BEGIN IMMEDIATE: this read holds the write lock, so a fault committed
         # by a concurrent request is seen. Only head faults gate a load (a printer-wide fault —
         # head NULL — and AMS slots do not).
-        faults = maintenance.list_faults(ctx.conn, slot.printer, head=slot.head) if slot.is_head else []
-        if faults:
-            named = [
-                {"id": fault["id"], "symptom": maintenance.one_line(fault["symptom"], FAULT_SYMPTOM_CHARS)}
-                for fault in faults[:FAULTS_NAMED]
-            ]
-            shown = "; ".join(f"#{n['id']} {n['symptom']}" for n in named)
-            more = f" (+{len(faults) - len(named)} more)" if len(faults) > len(named) else ""
-            raise SpoolError(
-                409,
-                f"{slot.key} has {len(faults)} open fault(s): {shown}{more} — close all of them before loading",
-                detail={"printer": slot.printer, "head": slot.head, "open_faults": len(faults), "faults": named},
-            )
+        _refuse_open_faults(ctx, slot)
         occupants = [
             o for o in spool_in_slot(ctx.spoolman, slot) if int(o["id"]) != spool_id
         ]
         if occupants and replace_to is None:
-            o = occupants[0]
-            raise SpoolError(
-                409,
-                f"{slot.key} already holds spool #{o['id']} ({view(ctx.conn, o)['name']}); "
-                "unload it first, or pass replace_to (where it goes)",
-                detail={"occupant": o["id"]},
-            )
+            _refuse_occupied(ctx, slot, occupants[0])
         back = (
             _storage(ctx.conn, replace_to, "replace_to is where the current spool goes")
             if occupants and replace_to
@@ -773,12 +850,12 @@ def load(
             _emit_unloaded(
                 ctx, int(o["id"]), slot.key, back.path if back else None, "replaced"
             )
-            _place(ctx, int(o["id"]), back, {"printops_slot": ""})
+            _place(ctx, int(o["id"]), back)
         if was and was != slot.key:
             _emit_unloaded(ctx, spool_id, was, slot.path, "moved to another slot")
-        extra: dict[str, Any] = {"printops_slot": slot.key}
-        if not extra_value(sp, "opened_at"):
-            extra["opened_at"] = db.utc_now()
+        fields: dict[str, Any] = {}
+        if not sp.get("first_used"):
+            fields["first_used"] = db.utc_now()
         ev.emit(
             ctx.conn,
             "slot.loaded",
@@ -791,12 +868,14 @@ def load(
             },
             ctx.actor,
         )
-        sp = _place(ctx, spool_id, loc, extra)
+        sp = _place(ctx, spool_id, loc, fields)
     out = view(ctx.conn, sp)
     out["printer_write"] = (
         head_sync.sync_head(ctx, slot, sp, force_official=force_official)
         if printer_write
-        else head_sync.Outcome(head_sync.SKIPPED, "printer write turned off for this load")
+        else head_sync.Outcome(
+            head_sync.SKIPPED, "printer write turned off for this load"
+        )
     ).to_dict()
     return out
 
@@ -821,14 +900,7 @@ def unload(
     transaction cannot cover both, because each is its own Spoolman write. Residual race: a
     request that moves the spool between the two steps wins; the unload then answers 404 and
     the weighing (still true) stays booked."""
-    try:
-        slot = check_slot(printer, head, usable=False)
-    except SpoolError as e:
-        if e.status not in (404, 503):
-            raise
-        # a printer/head that left the fleet (or no readable fleet) can still be emptied; the
-        # raw name matches the stored slot case-insensitively (spool_in_slot)
-        slot = SlotRef(printer, head)
+    slot = _slot_to_empty(printer, head)
     loc = (
         _storage(
             ctx.conn, to, "unload goes to storage; load into the other slot instead"
@@ -838,17 +910,7 @@ def unload(
     )
     drift: float | None = None
     if gross_g is not None:
-        bound = _bound(ctx, slot, spool_id)
-        if len(bound) > 1:
-            raise SpoolError(
-                409,
-                f"{slot.key} holds {len(bound)} spools in Spoolman; pass spool_id to say which "
-                "one is on the scale",
-                detail={"spool_ids": [int(b["id"]) for b in bound]},
-            )
-        weighed = measure(ctx, int(bound[0]["id"]), gross_g, note="weighed at unload")
-        drift = weighed["drift_g"]
-        spool_id = int(bound[0]["id"])
+        spool_id, drift = _weigh_at_unload(ctx, slot, spool_id, gross_g)
     with db.transaction(ctx.conn):
         placed: list[JSON] = []
         # read the slot again under the write lock: the weighing above committed on its own,
@@ -856,16 +918,45 @@ def unload(
         for sp in _bound(ctx, slot, spool_id):
             sid = int(sp["id"])
             _emit_unloaded(ctx, sid, slot_of(sp), loc.path if loc else None, "unloaded")
-            placed.append(_place(ctx, sid, loc, {"printops_slot": ""}))
+            placed.append(_place(ctx, sid, loc))
     out = view(ctx.conn, placed[-1])
     if gross_g is not None:
         out["drift_g"] = drift
     out["printer_write"] = (
         head_sync.release_active_spool(ctx, slot, [int(sp["id"]) for sp in placed])
         if printer_write
-        else head_sync.Outcome(head_sync.SKIPPED, "printer write turned off for this unload")
+        else head_sync.Outcome(
+            head_sync.SKIPPED, "printer write turned off for this unload"
+        )
     ).to_dict()
     return out
+
+
+def _slot_to_empty(printer: str, head: str) -> SlotRef:
+    try:
+        return check_slot(printer, head, usable=False)
+    except SpoolError as e:
+        if e.status not in (404, 503):
+            raise
+        # a printer/head that left the fleet (or no readable fleet) can still be emptied; the
+        # raw name matches the stored slot case-insensitively (spool_in_slot)
+        return SlotRef(printer, head)
+
+
+def _weigh_at_unload(
+    ctx: Ctx, slot: SlotRef, spool_id: int | None, gross_g: float
+) -> tuple[int, float | None]:
+    """Weigh the spool in `slot` (committed on its own); (its id, the drift)."""
+    bound = _bound(ctx, slot, spool_id)
+    if len(bound) > 1:
+        raise SpoolError(
+            409,
+            f"{slot.key} holds {len(bound)} spools in Spoolman; pass spool_id to say which "
+            "one is on the scale",
+            detail={"spool_ids": [int(b["id"]) for b in bound]},
+        )
+    weighed = measure(ctx, int(bound[0]["id"]), gross_g, note="weighed at unload")
+    return int(bound[0]["id"]), weighed["drift_g"]
 
 
 def _bound(ctx: Ctx, slot: SlotRef, spool_id: int | None) -> list[JSON]:
@@ -1073,7 +1164,7 @@ def empty(ctx: Ctx, spool_id: int, *, note: str | None = None) -> dict[str, Any]
             },
             ctx.actor,
         )
-        _place(ctx, spool_id, None, {"printops_slot": ""})
+        _place(ctx, spool_id, None)
         try:
             body: dict[str, Any] = {"archived": True}
             if sp.get("initial_weight"):
@@ -1087,15 +1178,7 @@ def empty(ctx: Ctx, spool_id: int, *, note: str | None = None) -> dict[str, Any]
 # -- import -------------------------------------------------------------------------------------
 
 
-def import_spools(
-    ctx: Ctx, items: Iterable[Mapping[str, Any]], *, dry_run: bool
-) -> dict[str, Any]:
-    """Idempotent import keyed by `external_key`: a key already in Spoolman (archived too) is
-    left alone and only reported (with fields that drifted from the source); a new key is
-    received. Every item is validated (field types and values, filament spec, location, unique
-    keys) before the first write, so a bad item fails the whole request instead of
-    half-importing it. dry_run computes the same plan without writing."""
-    parsed = [Receive.from_dict(raw) for raw in items]
+def _validate_import(ctx: Ctx, parsed: list[Receive]) -> None:
     seen: set[str] = set()
     for r in parsed:
         if not r.external_key:
@@ -1110,6 +1193,68 @@ def import_spools(
             _filament_spec(r)
         if r.location:
             _storage(ctx.conn, r.location, "import into storage")
+
+
+def _exists_action(r: Receive, have: JSON) -> dict[str, Any]:
+    fil = have.get("filament") or {}
+    want = _filament_spec(r) if r.filament_id is None else {}
+    differs = [
+        f"{k}: {fil.get(k)!r} in Spoolman, {want[k]!r} in the source"
+        for k in ("material", "name", "color_hex")
+        if k in want and not _ci(fil.get(k), want[k])
+    ]
+    if r.vendor and not _ci((fil.get("vendor") or {}).get("name"), r.vendor):
+        differs.append(
+            f"vendor: {(fil.get('vendor') or {}).get('name')!r} in Spoolman, {r.vendor!r} in the source"
+        )
+    return {
+        "key": r.external_key,
+        "action": "exists",
+        "spool_id": have["id"],
+        "differs": differs,
+    }
+
+
+def _create_plan(ctx: Ctx, r: Receive) -> dict[str, Any]:
+    spec = (
+        _filament_spec(r) if r.filament_id is None else {"filament_id": r.filament_id}
+    )
+    vendor = _match_vendor(ctx.spoolman, r.vendor, create=False) if r.vendor else None
+    fil = match_filament(ctx.spoolman, vendor, spec) if r.filament_id is None else None
+    return {
+        "key": r.external_key,
+        "action": "create",
+        "vendor": r.vendor,
+        "vendor_exists": vendor is not None or not r.vendor,
+        "filament": spec,
+        "filament_id": fil["id"] if fil else r.filament_id,
+        "location": r.location,
+        "price": r.price,
+        "net_g": r.net_g,
+    }
+
+
+def _created_action(r: Receive, created: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "key": r.external_key,
+        "action": "created",
+        "spool_id": created["id"],
+        "filament_id": created["filament_id"],
+        "filament_created": created["filament_created"],
+        "location": created["location"],
+    }
+
+
+def import_spools(
+    ctx: Ctx, items: Iterable[Mapping[str, Any]], *, dry_run: bool
+) -> dict[str, Any]:
+    """Idempotent import keyed by `external_key`: a key already in Spoolman (archived too) is
+    left alone and only reported (with fields that drifted from the source); a new key is
+    received. Every item is validated (field types and values, filament spec, location, unique
+    keys) before the first write, so a bad item fails the whole request instead of
+    half-importing it. dry_run computes the same plan without writing."""
+    parsed = [Receive.from_dict(raw) for raw in items]
+    _validate_import(ctx, parsed)
     existing = {
         extra_value(sp, "external_key"): sp
         for sp in all_spools(ctx.spoolman, archived=True)
@@ -1120,67 +1265,11 @@ def import_spools(
         assert r.external_key is not None
         have = existing.get(r.external_key)
         if have is not None:
-            fil = have.get("filament") or {}
-            want = _filament_spec(r) if r.filament_id is None else {}
-            differs = [
-                f"{k}: {fil.get(k)!r} in Spoolman, {want[k]!r} in the source"
-                for k in ("material", "name", "color_hex")
-                if k in want and not _ci(fil.get(k), want[k])
-            ]
-            if r.vendor and not _ci((fil.get("vendor") or {}).get("name"), r.vendor):
-                differs.append(
-                    f"vendor: {(fil.get('vendor') or {}).get('name')!r} in Spoolman, {r.vendor!r} in the source"
-                )
-            actions.append(
-                {
-                    "key": r.external_key,
-                    "action": "exists",
-                    "spool_id": have["id"],
-                    "differs": differs,
-                }
-            )
-            continue
-        if dry_run:
-            spec = (
-                _filament_spec(r)
-                if r.filament_id is None
-                else {"filament_id": r.filament_id}
-            )
-            vendor = (
-                _match_vendor(ctx.spoolman, r.vendor, create=False)
-                if r.vendor
-                else None
-            )
-            fil = (
-                match_filament(ctx.spoolman, vendor, spec)
-                if r.filament_id is None
-                else None
-            )
-            actions.append(
-                {
-                    "key": r.external_key,
-                    "action": "create",
-                    "vendor": r.vendor,
-                    "vendor_exists": vendor is not None or not r.vendor,
-                    "filament": spec,
-                    "filament_id": fil["id"] if fil else r.filament_id,
-                    "location": r.location,
-                    "price": r.price,
-                    "net_g": r.net_g,
-                }
-            )
-            continue
-        created = receive(ctx, r)
-        actions.append(
-            {
-                "key": r.external_key,
-                "action": "created",
-                "spool_id": created["id"],
-                "filament_id": created["filament_id"],
-                "filament_created": created["filament_created"],
-                "location": created["location"],
-            }
-        )
+            actions.append(_exists_action(r, have))
+        elif dry_run:
+            actions.append(_create_plan(ctx, r))
+        else:
+            actions.append(_created_action(r, receive(ctx, r)))
     counts: dict[str, int] = {}
     for a in actions:
         counts[a["action"]] = counts.get(a["action"], 0) + 1

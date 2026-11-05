@@ -14,7 +14,7 @@ A colour-mix kind (scope printer + `mix`, #412, plan §20.4) is keyed by its can
 (printops.mix_key, column `mix`, migration 0081): records of other mixes never supersede it.
 
 REQUIREMENT ENGINE (plan §8.1): for a printer head and the spool bound to it (Spoolman
-`printops_slot`, #160) every catalog kind of the printer's model gets a status:
+`location` = `slot:<p>/<head>`, #160) every catalog kind of the printer's model gets a status:
   current            a valid record matches every scope dimension
   assumed            baseline `assumed` kind, never recorded and never invalidated (factory state)
   new_lot            a valid record exists for this filament, but for another (or unknown) lot
@@ -65,7 +65,7 @@ from typing import Any
 
 from printops import db
 from printops import events as ev
-from printops.calibration_catalog import Catalog, CatalogError, Kind
+from printops.calibration_catalog import Catalog, CatalogError, GcodeCheck, Kind
 from printops.calibration_policy import CalibrationPolicy
 from printops.fleet import Fleet, FleetPrinter, Head
 from printops.mix_key import MixKeyError, canonical
@@ -83,7 +83,9 @@ _TRUE = {"1", "true", "yes", "on"}
 class CalibrationError(Exception):
     """A request that cannot be done; `status` is the HTTP status 3d-api answers."""
 
-    def __init__(self, status: int, message: str, *, detail: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self, status: int, message: str, *, detail: Mapping[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
@@ -113,17 +115,33 @@ class Nozzle:
     def same(self, other: Nozzle) -> bool:
         if self.install_id is not None and other.install_id is not None:
             return self.install_id == other.install_id
-        pairs = ((self.diameter_mm, other.diameter_mm), (self.material, other.material), (self.type, other.type))
+        pairs = (
+            (self.diameter_mm, other.diameter_mm),
+            (self.material, other.material),
+            (self.type, other.type),
+        )
         return all(a is None or b is None or a == b for a, b in pairs)
 
     def label(self) -> str:
-        parts = [f"{self.diameter_mm:g} mm" if self.diameter_mm else "", self.material or "", self.type or ""]
+        parts = [
+            f"{self.diameter_mm:g} mm" if self.diameter_mm else "",
+            self.material or "",
+            self.type or "",
+        ]
         text = " ".join(p for p in parts if p) or "unknown nozzle"
-        return f"{text} (install #{self.install_id})" if self.install_id is not None else text
+        return (
+            f"{text} (install #{self.install_id})"
+            if self.install_id is not None
+            else text
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"install_id": self.install_id, "diameter_mm": self.diameter_mm,
-                "material": self.material, "type": self.type}
+        return {
+            "install_id": self.install_id,
+            "diameter_mm": self.diameter_mm,
+            "material": self.material,
+            "type": self.type,
+        }
 
 
 @dataclass(frozen=True)
@@ -136,7 +154,9 @@ class Filament:
     spool_id: int | None = None
 
     @classmethod
-    def from_filament(cls, fil: Mapping[str, Any], *, lot_nr: str | None, spool_id: int | None) -> Filament:
+    def from_filament(
+        cls, fil: Mapping[str, Any], *, lot_nr: str | None, spool_id: int | None
+    ) -> Filament:
         vendor = fil.get("vendor") or {}
         material = fil.get("material")
         return cls(
@@ -150,16 +170,28 @@ class Filament:
 
     @classmethod
     def from_spool(cls, spool: Mapping[str, Any]) -> Filament:
-        return cls.from_filament(spool.get("filament") or {}, lot_nr=spool.get("lot_nr"),
-                                 spool_id=int(spool["id"]))
+        return cls.from_filament(
+            spool.get("filament") or {},
+            lot_nr=spool.get("lot_nr"),
+            spool_id=int(spool["id"]),
+        )
 
     def label(self) -> str:
-        what = " ".join(x for x in (self.vendor, self.name or self.material) if x) or "unknown filament"
+        what = (
+            " ".join(x for x in (self.vendor, self.name or self.material) if x)
+            or "unknown filament"
+        )
         return what + (f" lot {self.lot_nr}" if self.lot_nr else "")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"filament_id": self.filament_id, "name": self.name, "vendor": self.vendor,
-                "material": self.material, "lot_nr": self.lot_nr, "spool_id": self.spool_id}
+        return {
+            "filament_id": self.filament_id,
+            "name": self.name,
+            "vendor": self.vendor,
+            "material": self.material,
+            "lot_nr": self.lot_nr,
+            "spool_id": self.spool_id,
+        }
 
 
 def _lot(value: Any) -> str | None:
@@ -168,7 +200,9 @@ def _lot(value: Any) -> str | None:
 
 
 def _ci(a: str | None, b: str | None) -> bool:
-    return a is not None and b is not None and a.strip().casefold() == b.strip().casefold()
+    return (
+        a is not None and b is not None and a.strip().casefold() == b.strip().casefold()
+    )
 
 
 # -- records ----------------------------------------------------------------------------------
@@ -202,8 +236,15 @@ class Calibration:
 
     @classmethod
     def from_row(cls, r: sqlite3.Row) -> Calibration:
-        has_nozzle = any(r[k] is not None for k in ("nozzle_install_id", "nozzle_diameter_mm",
-                                                     "nozzle_material", "nozzle_type"))
+        has_nozzle = any(
+            r[k] is not None
+            for k in (
+                "nozzle_install_id",
+                "nozzle_diameter_mm",
+                "nozzle_material",
+                "nozzle_type",
+            )
+        )
         has_fil = r["filament_id"] is not None or r["material"] is not None
         return cls(
             id=int(r["id"]),
@@ -211,16 +252,32 @@ class Calibration:
             status=str(r["status"]),
             printer=r["printer"],
             head=r["head"],
-            nozzle=Nozzle(r["nozzle_install_id"], r["nozzle_diameter_mm"], r["nozzle_material"],
-                          r["nozzle_type"]) if has_nozzle else None,
+            nozzle=Nozzle(
+                r["nozzle_install_id"],
+                r["nozzle_diameter_mm"],
+                r["nozzle_material"],
+                r["nozzle_type"],
+            )
+            if has_nozzle
+            else None,
             plate=r["plate"],
-            filament=Filament(r["filament_id"], r["filament_name"], r["vendor"], r["material"],
-                              r["lot_nr"], r["spool_id"]) if has_fil else None,
+            filament=Filament(
+                r["filament_id"],
+                r["filament_name"],
+                r["vendor"],
+                r["material"],
+                r["lot_nr"],
+                r["spool_id"],
+            )
+            if has_fil
+            else None,
             method=str(r["method"]),
             params=json.loads(r["params"]),
             gcode_path=r["gcode_path"],
             gcode_sha=r["gcode_sha"],
-            values=json.loads(r["values_json"]) if r["values_json"] is not None else None,
+            values=json.loads(r["values_json"])
+            if r["values_json"] is not None
+            else None,
             evidence=json.loads(r["evidence"]),
             applied_to=json.loads(r["applied_to"]),
             note=r["note"],
@@ -235,23 +292,40 @@ class Calibration:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "id": self.id, "kind": self.kind, "status": self.status,
-            "printer": self.printer, "head": self.head,
+            "id": self.id,
+            "kind": self.kind,
+            "status": self.status,
+            "printer": self.printer,
+            "head": self.head,
             "nozzle": self.nozzle.to_dict() if self.nozzle else None,
             "plate": self.plate,
             "mix": self.mix,
             "filament": self.filament.to_dict() if self.filament else None,
-            "method": self.method, "params": self.params,
-            "gcode_path": self.gcode_path, "gcode_sha": self.gcode_sha,
-            "values": self.values, "evidence": self.evidence, "applied_to": self.applied_to,
-            "note": self.note, "created_at": self.created_at, "created_by": self.created_by,
-            "recorded_at": self.recorded_at, "recorded_by": self.recorded_by,
-            "valid_until": self.valid_until, "superseded_by": self.superseded_by,
+            "method": self.method,
+            "params": self.params,
+            "gcode_path": self.gcode_path,
+            "gcode_sha": self.gcode_sha,
+            "values": self.values,
+            "evidence": self.evidence,
+            "applied_to": self.applied_to,
+            "note": self.note,
+            "created_at": self.created_at,
+            "created_by": self.created_by,
+            "recorded_at": self.recorded_at,
+            "recorded_by": self.recorded_by,
+            "valid_until": self.valid_until,
+            "superseded_by": self.superseded_by,
         }
 
     def applied_to_firmware(self) -> dict[str, Any] | None:
-        return next((a for a in reversed(self.applied_to)
-                     if str(a.get("target", "")).startswith("klipper:")), None)
+        return next(
+            (
+                a
+                for a in reversed(self.applied_to)
+                if str(a.get("target", "")).startswith("klipper:")
+            ),
+            None,
+        )
 
 
 def get(conn: sqlite3.Connection, cal_id: int) -> Calibration:
@@ -282,11 +356,18 @@ def list_calibrations(
 ) -> list[Calibration]:
     """Newest first. `current` = recorded and not superseded (validity is the engine's call)."""
     if status is not None and status not in STATUSES:
-        raise CalibrationError(422, f"status must be one of {', '.join(STATUSES)}, got {status!r}")
+        raise CalibrationError(
+            422, f"status must be one of {', '.join(STATUSES)}, got {status!r}"
+        )
     where: list[str] = ["1 = 1"]
     args: list[str | int] = []
     mix = _mix_or_422(mix)
-    for col, val in (("printer", printer), ("kind", kind), ("status", status), ("mix", mix)):
+    for col, val in (
+        ("printer", printer),
+        ("kind", kind),
+        ("status", status),
+        ("mix", mix),
+    ):
         if val is not None:
             where.append(f"{col} = ?")
             args.append(val)
@@ -297,7 +378,8 @@ def list_calibrations(
         where.append("status = 'recorded' AND superseded_by IS NULL")
     args.append(max(1, min(limit, 1000)))
     rows = conn.execute(
-        f"SELECT * FROM calibration WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?", args
+        f"SELECT * FROM calibration WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?",
+        args,
     ).fetchall()
     return [Calibration.from_row(r) for r in rows]
 
@@ -308,15 +390,21 @@ def list_calibrations(
 def fleet_printer(fleet: Fleet, name: str) -> FleetPrinter:
     p = fleet.printers.get(name)
     if p is None:
-        raise CalibrationError(404, f"unknown printer {name!r}; fleet has: {', '.join(sorted(fleet.printers))}")
+        raise CalibrationError(
+            404,
+            f"unknown printer {name!r}; fleet has: {', '.join(sorted(fleet.printers))}",
+        )
     return p
 
 
 def fleet_head(p: FleetPrinter, label: str) -> Head:
     h = next((x for x in p.heads if x.label.casefold() == label.casefold()), None)
     if h is None:
-        raise CalibrationError(404, f"{p.name} has no head {label!r}; heads: "
-                                    f"{', '.join(x.label for x in p.heads) or '-'}")
+        raise CalibrationError(
+            404,
+            f"{p.name} has no head {label!r}; heads: "
+            f"{', '.join(x.label for x in p.heads) or '-'}",
+        )
     return h
 
 
@@ -332,7 +420,12 @@ def current_nozzle(conn: sqlite3.Connection, printer: str, head: Head) -> Nozzle
     if fn is not None:
         row = fn(conn, printer, head.label)
         if row:
-            return Nozzle(row.get("id"), row.get("diameter_mm"), row.get("material"), row.get("type"))
+            return Nozzle(
+                row.get("id"),
+                row.get("diameter_mm"),
+                row.get("material"),
+                row.get("type"),
+            )
     n = head.nozzle
     return Nozzle(None, n.diameter_mm, n.material, n.type) if n else None
 
@@ -340,12 +433,17 @@ def current_nozzle(conn: sqlite3.Connection, printer: str, head: Head) -> Nozzle
 def _plate(p: FleetPrinter, plate: str | None, *, required: bool) -> str | None:
     if plate is not None:
         if p.plates is not None and plate not in p.plates:
-            raise CalibrationError(422, f"{p.name} has no plate {plate!r}; plates: {', '.join(p.plates) or '-'}")
+            raise CalibrationError(
+                422,
+                f"{p.name} has no plate {plate!r}; plates: {', '.join(p.plates) or '-'}",
+            )
         return plate
     if p.plates is not None and len(p.plates) == 1:
         return p.plates[0]
     if required and p.plates:
-        raise CalibrationError(422, f"{p.name} has several plates ({', '.join(p.plates)}): pass plate")
+        raise CalibrationError(
+            422, f"{p.name} has several plates ({', '.join(p.plates)}): pass plate"
+        )
     return None
 
 
@@ -367,7 +465,9 @@ def _filament(sm: Spoolman | None, filament_id: int) -> JSON:
         return sm.get("filament", filament_id)
     except SpoolmanError as e:
         if e.status == 404:
-            raise CalibrationError(404, f"no filament #{filament_id} in Spoolman") from e
+            raise CalibrationError(
+                404, f"no filament #{filament_id} in Spoolman"
+            ) from e
         raise CalibrationError(502, e.message) from e
 
 
@@ -388,10 +488,15 @@ def _bound_spool(sm: Spoolman, printer: str, head: Head) -> JSON:
     except SpoolError as e:
         raise CalibrationError(502, f"Spoolman unreachable: {e.message}") from e
     if not found:
-        raise CalibrationError(404, f"no spool bound to {printer}/{head.label} (`3d printops spool load`)")
+        raise CalibrationError(
+            404, f"no spool bound to {printer}/{head.label} (`3d printops spool load`)"
+        )
     if len(found) > 1:
         ids = ", ".join(f"#{s['id']}" for s in found)
-        raise CalibrationError(409, f"{len(found)} spools bound to {printer}/{head.label} ({ids}): fix the binding")
+        raise CalibrationError(
+            409,
+            f"{len(found)} spools bound to {printer}/{head.label} ({ids}): fix the binding",
+        )
     return found[0]
 
 
@@ -404,7 +509,9 @@ def bound_filament(sm: Spoolman | None, printer: str, head: Head) -> Bound:
         return Bound(None, e.message)
 
 
-def slicer_preset(ctx: Ctx, printer: str, *, head: str | None = None, spool_id: int | None = None) -> dict[str, Any]:
+def slicer_preset(
+    ctx: Ctx, printer: str, *, head: str | None = None, spool_id: int | None = None
+) -> dict[str, Any]:
     """The slicer filament preset of the spool bound to `printer`'s head, or of spool `spool_id`
     (the spool's own extra field, else its filament's; #294). `preset` is None when the spool
     carries none, `scope` says where it was found ("spool" | "filament"), `bound` whether the spool
@@ -420,7 +527,8 @@ def slicer_preset(ctx: Ctx, printer: str, *, head: str | None = None, spool_id: 
     else:
         if h is None and len(p.heads) != 1:
             raise CalibrationError(
-                422, f"{p.name} has {len(p.heads)} heads ({', '.join(x.label for x in p.heads)}): pass head or spool"
+                422,
+                f"{p.name} has {len(p.heads)} heads ({', '.join(x.label for x in p.heads)}): pass head or spool",
             )
         h = h or p.heads[0]
         spool = _bound_spool(ctx.spoolman, p.name, h)
@@ -480,8 +588,24 @@ class RunRequest:
         sha = text("gcode_sha")
         if sha is not None and not re.fullmatch(r"[0-9a-f]{64}", sha):
             raise CalibrationError(422, "gcode_sha must be a lower-case hex sha256")
-        known = {"kind", "method", "printer", "head", "spool_id", "filament_id", "lot_nr", "plate", "mix",
-                 "params", "gcode_path", "gcode_sha", "note", "values", "evidence", "valid_until"}
+        known = {
+            "kind",
+            "method",
+            "printer",
+            "head",
+            "spool_id",
+            "filament_id",
+            "lot_nr",
+            "plate",
+            "mix",
+            "params",
+            "gcode_path",
+            "gcode_sha",
+            "note",
+            "values",
+            "evidence",
+            "valid_until",
+        }
         unknown = sorted(str(k) for k in data if k not in known)
         if unknown:
             raise CalibrationError(422, f"unknown field(s) {', '.join(unknown)}")
@@ -524,19 +648,19 @@ def _kind(catalog: Catalog, kind_id: str) -> Kind:
         raise CalibrationError(422, str(e)) from e
 
 
-def _snapshot(ctx: Ctx, req: RunRequest) -> _Snapshot:
-    """Resolve the request's scope against the fleet and Spoolman (reads only)."""
-    kind = _kind(ctx.catalog, req.kind)
-    if req.method not in kind.methods:
-        raise CalibrationError(422, f"{kind.id}: unknown method {req.method!r}; accepted: {', '.join(kind.methods)}")
-    printer = head = plate = None
-    nozzle: Nozzle | None = None
-    head_obj: Head | None = None
+def _resolve_scope(
+    ctx: Ctx, req: RunRequest, kind: Kind
+) -> tuple[FleetPrinter | None, Head | None]:
+    """Printer and head the request names, validated against the kind's scope."""
     p: FleetPrinter | None = None
+    head_obj: Head | None = None
     if req.printer is not None:
         p = fleet_printer(ctx.fleet, req.printer)
         if not kind.applies_to(p.model):
-            raise CalibrationError(422, f"{kind.id} does not exist for {p.model} ({', '.join(kind.models or ())} only)")
+            raise CalibrationError(
+                422,
+                f"{kind.id} does not exist for {p.model} ({', '.join(kind.models or ())} only)",
+            )
         if req.head is not None:
             head_obj = fleet_head(p, req.head)
     elif kind.printer_scoped or req.head is not None:
@@ -544,7 +668,81 @@ def _snapshot(ctx: Ctx, req: RunRequest) -> _Snapshot:
     if kind.head_scoped and head_obj is None:
         raise CalibrationError(422, f"{kind.id} is per head: pass head (T1..Tn)")
     if head_obj is not None and not head_obj.usable:
-        raise CalibrationError(409, f"{req.printer} {head_obj.label} is not usable: {head_obj.reason or 'see fleet'}")
+        raise CalibrationError(
+            409,
+            f"{req.printer} {head_obj.label} is not usable: {head_obj.reason or 'see fleet'}",
+        )
+    return p, head_obj
+
+
+def _resolve_mix(req: RunRequest, kind: Kind) -> str | None:
+    if not kind.mix_scoped:
+        if req.mix is not None:
+            raise CalibrationError(422, f"{kind.id} is not per colour mix: drop mix")
+        return None
+    if req.mix is None:
+        raise CalibrationError(
+            422, f"{kind.id} is per colour mix: pass mix (e.g. h0.12:f3.f12.f7)"
+        )
+    if req.head is not None or req.spool_id is not None or req.filament_id is not None:
+        # the key names the filaments; a head or spool would be stored half (no filament)
+        raise CalibrationError(
+            422,
+            f"{kind.id} is per printer and mix: drop head, spool_id and filament_id",
+        )
+    return _mix_or_422(req.mix)  # requests built in code skip from_json
+
+
+def _resolve_filament(
+    ctx: Ctx, req: RunRequest, kind: Kind, head_obj: Head | None
+) -> tuple[Filament | None, int | None]:
+    """Filament (and the spool id to record) the run is scoped to."""
+    filament: Filament | None = None
+    spool_id = req.spool_id
+    if req.spool_id is not None:
+        filament = Filament.from_spool(_spool(ctx.spoolman, req.spool_id))
+    elif req.filament_id is not None:
+        filament = Filament.from_filament(
+            _filament(ctx.spoolman, req.filament_id), lot_nr=None, spool_id=None
+        )
+    elif "filament" in kind.scope and head_obj is not None and req.printer is not None:
+        bound = bound_filament(ctx.spoolman, req.printer, head_obj)
+        if bound.filament is None:
+            raise CalibrationError(
+                422,
+                f"{kind.id} is per filament: pass spool_id or filament_id ({bound.note})",
+            )
+        filament = bound.filament
+        spool_id = filament.spool_id
+    if "filament" in kind.scope and filament is None:
+        raise CalibrationError(
+            422, f"{kind.id} is per filament: pass spool_id or filament_id"
+        )
+    if filament is not None and req.lot_nr is not None:
+        filament = Filament(
+            filament.filament_id,
+            filament.name,
+            filament.vendor,
+            filament.material,
+            _lot(req.lot_nr),
+            filament.spool_id,
+        )
+    if "filament" not in kind.scope:
+        filament = None
+    return filament, spool_id
+
+
+def _snapshot(ctx: Ctx, req: RunRequest) -> _Snapshot:
+    """Resolve the request's scope against the fleet and Spoolman (reads only)."""
+    kind = _kind(ctx.catalog, req.kind)
+    if req.method not in kind.methods:
+        raise CalibrationError(
+            422,
+            f"{kind.id}: unknown method {req.method!r}; accepted: {', '.join(kind.methods)}",
+        )
+    printer = head = plate = None
+    nozzle: Nozzle | None = None
+    p, head_obj = _resolve_scope(ctx, req, kind)
     if kind.printer_scoped:
         printer = req.printer
     if kind.head_scoped and head_obj is not None:
@@ -553,36 +751,8 @@ def _snapshot(ctx: Ctx, req: RunRequest) -> _Snapshot:
         nozzle = current_nozzle(ctx.conn, req.printer, head_obj)
     if "plate" in kind.scope and p is not None:
         plate = _plate(p, req.plate, required=True)
-    mix: str | None = None
-    if kind.mix_scoped:
-        if req.mix is None:
-            raise CalibrationError(422, f"{kind.id} is per colour mix: pass mix (e.g. h0.12:f3.f12.f7)")
-        if req.head is not None or req.spool_id is not None or req.filament_id is not None:
-            # the key names the filaments; a head or spool would be stored half (no filament)
-            raise CalibrationError(422, f"{kind.id} is per printer and mix: drop head, spool_id and filament_id")
-        mix = _mix_or_422(req.mix)  # requests built in code skip from_json
-    elif req.mix is not None:
-        raise CalibrationError(422, f"{kind.id} is not per colour mix: drop mix")
-
-    filament: Filament | None = None
-    spool_id = req.spool_id
-    if req.spool_id is not None:
-        filament = Filament.from_spool(_spool(ctx.spoolman, req.spool_id))
-    elif req.filament_id is not None:
-        filament = Filament.from_filament(_filament(ctx.spoolman, req.filament_id), lot_nr=None, spool_id=None)
-    elif "filament" in kind.scope and head_obj is not None and req.printer is not None:
-        bound = bound_filament(ctx.spoolman, req.printer, head_obj)
-        if bound.filament is None:
-            raise CalibrationError(422, f"{kind.id} is per filament: pass spool_id or filament_id ({bound.note})")
-        filament = bound.filament
-        spool_id = filament.spool_id
-    if "filament" in kind.scope and filament is None:
-        raise CalibrationError(422, f"{kind.id} is per filament: pass spool_id or filament_id")
-    if filament is not None and req.lot_nr is not None:
-        filament = Filament(filament.filament_id, filament.name, filament.vendor, filament.material,
-                            _lot(req.lot_nr), filament.spool_id)
-    if "filament" not in kind.scope:
-        filament = None
+    mix = _resolve_mix(req, kind)
+    filament, spool_id = _resolve_filament(ctx, req, kind, head_obj)
     return _Snapshot(kind, printer, head, nozzle, plate, filament, spool_id, mix)
 
 
@@ -594,15 +764,28 @@ def _insert(ctx: Ctx, snap: _Snapshot, req: RunRequest) -> int:
                spool_id, method, params, gcode_path, gcode_sha, note, created_at, created_by, mix)
            VALUES (?, 'planned', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            snap.kind.id, snap.printer, snap.head,
-            n.install_id if n else None, n.diameter_mm if n else None,
-            n.material if n else None, n.type if n else None,
+            snap.kind.id,
+            snap.printer,
+            snap.head,
+            n.install_id if n else None,
+            n.diameter_mm if n else None,
+            n.material if n else None,
+            n.type if n else None,
             snap.plate,
-            f.filament_id if f else None, f.name if f else None, f.vendor if f else None,
-            f.material if f else None, f.lot_nr if f else None,
-            snap.spool_id, req.method,
-            json.dumps(dict(req.params), sort_keys=True), req.gcode_path, req.gcode_sha, req.note,
-            db.utc_now(), ctx.actor, snap.mix,
+            f.filament_id if f else None,
+            f.name if f else None,
+            f.vendor if f else None,
+            f.material if f else None,
+            f.lot_nr if f else None,
+            snap.spool_id,
+            req.method,
+            json.dumps(dict(req.params), sort_keys=True),
+            req.gcode_path,
+            req.gcode_sha,
+            req.note,
+            db.utc_now(),
+            ctx.actor,
+            snap.mix,
         ),
     )
     return int(cur.lastrowid or 0)
@@ -610,7 +793,10 @@ def _insert(ctx: Ctx, snap: _Snapshot, req: RunRequest) -> int:
 
 def _event_scope(cal: Calibration) -> dict[str, Any]:
     return {
-        "id": cal.id, "kind": cal.kind, "printer": cal.printer, "head": cal.head,
+        "id": cal.id,
+        "kind": cal.kind,
+        "printer": cal.printer,
+        "head": cal.head,
         "filament_id": cal.filament.filament_id if cal.filament else None,
         "lot_nr": cal.filament.lot_nr if cal.filament else None,
         "mix": cal.mix,
@@ -624,8 +810,13 @@ def start_run(ctx: Ctx, req: RunRequest) -> Calibration:
     with db.transaction(ctx.conn):
         cal_id = _insert(ctx, snap, req)
         cal = get(ctx.conn, cal_id)
-        ev.emit(ctx.conn, "calibration.planned", f"calibration:{cal_id}",
-                {**_event_scope(cal), "gcode_sha": cal.gcode_sha}, ctx.actor)
+        ev.emit(
+            ctx.conn,
+            "calibration.planned",
+            f"calibration:{cal_id}",
+            {**_event_scope(cal), "gcode_sha": cal.gcode_sha},
+            ctx.actor,
+        )
     return cal
 
 
@@ -637,7 +828,9 @@ def _valid_until(value: Any) -> str | None:
     try:
         dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as e:
-        raise CalibrationError(422, f"valid_until must be an ISO date, got {value!r}") from e
+        raise CalibrationError(
+            422, f"valid_until must be an ISO date, got {value!r}"
+        ) from e
     dt = dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
     dt = dt.astimezone(datetime.timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
@@ -648,20 +841,31 @@ def _same_scope(a: Calibration, b: Calibration, lot_sensitive: bool) -> bool:
     lot-sensitive kind; for the others two lots of one filament are the same scope."""
     fa, fb = a.filament, b.filament
     same_fil = (fa is None and fb is None) or (
-        fa is not None and fb is not None and fa.filament_id == fb.filament_id
+        fa is not None
+        and fb is not None
+        and fa.filament_id == fb.filament_id
         and (fa.filament_id is not None or _ci(fa.material, fb.material))
         and (not lot_sensitive or fa.lot_nr == fb.lot_nr)
     )
     same_nozzle = (a.nozzle is None and b.nozzle is None) or (
         a.nozzle is not None and b.nozzle is not None and a.nozzle.same(b.nozzle)
     )
-    return (a.kind == b.kind and a.printer == b.printer and a.head == b.head and a.plate == b.plate
-            and a.mix == b.mix and same_fil and same_nozzle)
+    return (
+        a.kind == b.kind
+        and a.printer == b.printer
+        and a.head == b.head
+        and a.plate == b.plate
+        and a.mix == b.mix
+        and same_fil
+        and same_nozzle
+    )
 
 
 def _apply_result(ctx: Ctx, cal: Calibration, result: Mapping[str, Any]) -> Calibration:
     if cal.status != "planned":
-        raise CalibrationError(409, f"calibration #{cal.id} is {cal.status}, not planned")
+        raise CalibrationError(
+            409, f"calibration #{cal.id} is {cal.status}, not planned"
+        )
     kind = _kind(ctx.catalog, cal.kind)
     try:
         values = kind.check_values(result.get("values"))
@@ -678,16 +882,37 @@ def _apply_result(ctx: Ctx, cal: Calibration, result: Mapping[str, Any]) -> Cali
     ctx.conn.execute(
         """UPDATE calibration SET status = 'recorded', values_json = ?, evidence = ?, recorded_at = ?,
                recorded_by = ?, valid_until = ?, note = COALESCE(?, note) WHERE id = ?""",
-        (json.dumps(values, sort_keys=True), json.dumps(evidence), now, ctx.actor, until, note, cal.id),
+        (
+            json.dumps(values, sort_keys=True),
+            json.dumps(evidence),
+            now,
+            ctx.actor,
+            until,
+            note,
+            cal.id,
+        ),
     )
     new = get(ctx.conn, cal.id)
     # a mix kind is filtered by its key in SQL: mixes are many, the 1000-row page must not cut them
-    older = [c for c in list_calibrations(ctx.conn, kind=cal.kind, mix=new.mix, current=True, limit=1000)
-             if c.id != cal.id and _same_scope(c, new, _kind(ctx.catalog, cal.kind).lot_sensitive)]
+    older = [
+        c
+        for c in list_calibrations(
+            ctx.conn, kind=cal.kind, mix=new.mix, current=True, limit=1000
+        )
+        if c.id != cal.id
+        and _same_scope(c, new, _kind(ctx.catalog, cal.kind).lot_sensitive)
+    ]
     for c in older:
-        ctx.conn.execute("UPDATE calibration SET superseded_by = ? WHERE id = ?", (cal.id, c.id))
-    ev.emit(ctx.conn, "calibration.recorded", f"calibration:{cal.id}",
-            {**_event_scope(new), "values": values, "superseded": [c.id for c in older]}, ctx.actor)
+        ctx.conn.execute(
+            "UPDATE calibration SET superseded_by = ? WHERE id = ?", (cal.id, c.id)
+        )
+    ev.emit(
+        ctx.conn,
+        "calibration.recorded",
+        f"calibration:{cal.id}",
+        {**_event_scope(new), "values": values, "superseded": [c.id for c in older]},
+        ctx.actor,
+    )
     return new
 
 
@@ -741,11 +966,18 @@ def prepare_past(ctx: Ctx, past: PastRecord) -> PreparedRecord:
     except CatalogError as e:
         raise CalibrationError(422, str(e)) from e
     if snap.nozzle is not None and past.nozzle_diameter_mm is None:
-        snap = replace(snap, nozzle=None)  # the line names no nozzle: unknown, never today's
+        snap = replace(
+            snap, nozzle=None
+        )  # the line names no nozzle: unknown, never today's
     elif snap.nozzle is not None:
         n, d = snap.nozzle, past.nozzle_diameter_mm
         same = n.diameter_mm is None or d == n.diameter_mm
-        snap = replace(snap, nozzle=Nozzle(None, d, n.material if same else None, n.type if same else None))
+        snap = replace(
+            snap,
+            nozzle=Nozzle(
+                None, d, n.material if same else None, n.type if same else None
+            ),
+        )
     return PreparedRecord(snap, past, values)
 
 
@@ -761,29 +993,64 @@ def insert_past(ctx: Ctx, prep: PreparedRecord) -> Calibration:
     ctx.conn.execute(
         """UPDATE calibration SET status = 'recorded', values_json = ?, evidence = ?, applied_to = ?,
                created_at = ?, created_by = ?, recorded_at = ?, recorded_by = ? WHERE id = ?""",
-        (json.dumps(prep.values, sort_keys=True), json.dumps(past.evidence), json.dumps(past.applied_to),
-         past.at, past.by, past.at, past.by, cal_id),
+        (
+            json.dumps(prep.values, sort_keys=True),
+            json.dumps(past.evidence),
+            json.dumps(past.applied_to),
+            past.at,
+            past.by,
+            past.at,
+            past.by,
+            cal_id,
+        ),
     )
     new = get(ctx.conn, cal_id)
     kind = prep.snap.kind
+
     def overlaps(c: Calibration) -> bool:
         # an unknown nozzle on either side may be the same nozzle: order those by time too,
         # or the import (higher id) would win over a newer record of the same head + filament
-        probe = new if (new.nozzle is None) == (c.nozzle is None) else replace(new, nozzle=c.nozzle)
+        probe = (
+            new
+            if (new.nozzle is None) == (c.nozzle is None)
+            else replace(new, nozzle=c.nozzle)
+        )
         return _same_scope(c, probe, kind.lot_sensitive)
 
-    same = [c for c in list_calibrations(ctx.conn, kind=kind.id, mix=new.mix, current=True, limit=1000)
-            if c.id != cal_id and overlaps(c)]
+    same = [
+        c
+        for c in list_calibrations(
+            ctx.conn, kind=kind.id, mix=new.mix, current=True, limit=1000
+        )
+        if c.id != cal_id and overlaps(c)
+    ]
     older = [c for c in same if (c.recorded_at or "") <= past.at]
-    newer = sorted((c for c in same if (c.recorded_at or "") > past.at), key=lambda c: c.recorded_at or "")
+    newer = sorted(
+        (c for c in same if (c.recorded_at or "") > past.at),
+        key=lambda c: c.recorded_at or "",
+    )
     for c in older:
-        ctx.conn.execute("UPDATE calibration SET superseded_by = ? WHERE id = ?", (cal_id, c.id))
+        ctx.conn.execute(
+            "UPDATE calibration SET superseded_by = ? WHERE id = ?", (cal_id, c.id)
+        )
     if newer:
-        ctx.conn.execute("UPDATE calibration SET superseded_by = ? WHERE id = ?", (newer[0].id, cal_id))
+        ctx.conn.execute(
+            "UPDATE calibration SET superseded_by = ? WHERE id = ?",
+            (newer[0].id, cal_id),
+        )
         new = get(ctx.conn, cal_id)
-    ev.emit(ctx.conn, "calibration.recorded", f"calibration:{cal_id}",
-            {**_event_scope(new), "values": prep.values, "superseded": [c.id for c in older],
-             "imported": True}, ctx.actor)
+    ev.emit(
+        ctx.conn,
+        "calibration.recorded",
+        f"calibration:{cal_id}",
+        {
+            **_event_scope(new),
+            "values": prep.values,
+            "superseded": [c.id for c in older],
+            "imported": True,
+        },
+        ctx.actor,
+    )
     return new
 
 
@@ -811,9 +1078,15 @@ class Invalidation:
         return True
 
     def to_dict(self) -> dict[str, Any]:
-        return {"event_id": self.event_id, "at": self.at, "printer": self.printer, "head": self.head,
-                "trigger": self.trigger, "kinds": list(self.kinds) if self.kinds is not None else None,
-                "reason": self.reason}
+        return {
+            "event_id": self.event_id,
+            "at": self.at,
+            "printer": self.printer,
+            "head": self.head,
+            "trigger": self.trigger,
+            "kinds": list(self.kinds) if self.kinds is not None else None,
+            "reason": self.reason,
+        }
 
 
 def invalidations(conn: sqlite3.Connection, printer: str) -> list[Invalidation]:
@@ -826,12 +1099,17 @@ def invalidations(conn: sqlite3.Connection, printer: str) -> list[Invalidation]:
     for r in rows:
         p = json.loads(r["payload"])
         kinds = p.get("kinds")
-        out.append(Invalidation(
-            event_id=int(r["id"]), at=str(r["at"]), printer=printer,
-            head=p.get("head") or None, trigger=p.get("trigger"),
-            kinds=tuple(str(k) for k in kinds) if isinstance(kinds, list) else None,
-            reason=p.get("reason"),
-        ))
+        out.append(
+            Invalidation(
+                event_id=int(r["id"]),
+                at=str(r["at"]),
+                printer=printer,
+                head=p.get("head") or None,
+                trigger=p.get("trigger"),
+                kinds=tuple(str(k) for k in kinds) if isinstance(kinds, list) else None,
+                reason=p.get("reason"),
+            )
+        )
     return out
 
 
@@ -840,7 +1118,9 @@ def invalidations(conn: sqlite3.Connection, printer: str) -> list[Invalidation]:
 
 @dataclass
 class Requirement:
-    kind: Kind | None  # None: a gate row about a G-code tool the printer has no usable head for
+    kind: (
+        Kind | None
+    )  # None: a gate row about a G-code tool the printer has no usable head for
     printer: str | None
     head: str | None
     status: str
@@ -855,16 +1135,23 @@ class Requirement:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "kind": self.kind.id if self.kind else None, "title": self.kind.title if self.kind else None,
-            "printer": self.printer, "head": self.head, "tool": self.tool,
-            "status": self.status, "level": self.level, "detail": self.detail,
+            "kind": self.kind.id if self.kind else None,
+            "title": self.kind.title if self.kind else None,
+            "printer": self.printer,
+            "head": self.head,
+            "tool": self.tool,
+            "status": self.status,
+            "level": self.level,
+            "detail": self.detail,
             "record": self.record.to_dict() if self.record else None,
             "invalidation": self.invalidation.to_dict() if self.invalidation else None,
             "filament": self.filament.to_dict() if self.filament else None,
             "nozzle": self.nozzle.to_dict() if self.nozzle else None,
             "accepted": self.accepted,
-            "estimate": {"minutes": self.kind.estimate_minutes if self.kind else 0.0,
-                         "grams": self.kind.estimate_grams if self.kind else 0.0},
+            "estimate": {
+                "minutes": self.kind.estimate_minutes if self.kind else 0.0,
+                "grams": self.kind.estimate_grams if self.kind else 0.0,
+            },
         }
 
 
@@ -885,14 +1172,21 @@ class _Eval:
 def _candidates(conn: sqlite3.Connection, e: _Eval) -> list[Calibration]:
     k = e.kind
     if k.printer_scoped:
-        rows = list_calibrations(conn, kind=k.id, printer=e.printer, current=True, limit=1000)
+        rows = list_calibrations(
+            conn, kind=k.id, printer=e.printer, current=True, limit=1000
+        )
     else:
         rows = list_calibrations(conn, kind=k.id, current=True, limit=1000)
     out = []
     for c in rows:
         if k.head_scoped and not _ci(c.head, e.head):
             continue
-        if "plate" in k.scope and e.plate is not None and c.plate is not None and c.plate != e.plate:
+        if (
+            "plate" in k.scope
+            and e.plate is not None
+            and c.plate is not None
+            and c.plate != e.plate
+        ):
             continue
         out.append(c)
     return out
@@ -913,77 +1207,216 @@ def _when(at: str | None) -> str:
     return (at or "?")[:10]
 
 
-def evaluate(conn: sqlite3.Connection, policy: CalibrationPolicy, e: _Eval,
-             invs: Sequence[Invalidation], now: str) -> Requirement:
-    k = e.kind
+class _Evaluation:
+    """One kind/head's requirement verdicts; `evaluate` picks which one applies."""
 
-    def req(status: str, detail: str, record: Calibration | None = None,
-            inv: Invalidation | None = None, level: str | None = None) -> Requirement:
+    def __init__(
+        self,
+        policy: CalibrationPolicy,
+        e: _Eval,
+        invs: Sequence[Invalidation],
+        now: str,
+    ) -> None:
+        self.policy = policy
+        self.e = e
+        self.k = e.kind
+        self.invs = invs
+        self.now = now
+
+    def req(
+        self,
+        status: str,
+        detail: str,
+        record: Calibration | None = None,
+        inv: Invalidation | None = None,
+        level: str | None = None,
+    ) -> Requirement:
+        e, k = self.e, self.k
         if level is None:
-            level = _POLICY_LEVEL[policy.level(e.printer, k.id, status)]
-        return Requirement(kind=k, printer=e.printer, head=e.head, status=status, level=level,
-                           detail=detail, record=record, invalidation=inv, filament=e.filament,
-                           nozzle=e.nozzle)
+            level = _POLICY_LEVEL[self.policy.level(e.printer, k.id, status)]
+        return Requirement(
+            kind=k,
+            printer=e.printer,
+            head=e.head,
+            status=status,
+            level=level,
+            detail=detail,
+            record=record,
+            invalidation=inv,
+            filament=e.filament,
+            nozzle=e.nozzle,
+        )
 
-    def stale(c: Calibration) -> Invalidation | None:
+    def stale(self, c: Calibration) -> Invalidation | None:
         # `>=`: timestamps have millisecond resolution, and an invalidation in the same instant as
         # the recording must not be lost; a needless recalibration is the safe side.
-        hits = [i for i in invs if i.at >= (c.recorded_at or "") and i.hits(k, c.head)] if k.printer_scoped else []
+        hits = (
+            [
+                i
+                for i in self.invs
+                if i.at >= (c.recorded_at or "") and i.hits(self.k, c.head)
+            ]
+            if self.k.printer_scoped
+            else []
+        )
         return hits[-1] if hits else None
 
-    if "filament" in k.scope and e.filament is None:
-        return req("no_spool", e.filament_note or "the loaded filament is unknown", level=UNVERIFIED)
-    if "plate" in k.scope and e.plate is None and e.plates_known > 1:
-        # a record for one plate says nothing about another: never take one as current
-        return req("no_plate", f"{e.printer} has {e.plates_known} plates: pass plate", level=UNVERIFIED)
+    def unscoped(self) -> Requirement | None:
+        """The scope is incomplete, so no record can be matched."""
+        e, k = self.e, self.k
+        if "filament" in k.scope and e.filament is None:
+            return self.req(
+                "no_spool",
+                e.filament_note or "the loaded filament is unknown",
+                level=UNVERIFIED,
+            )
+        if "plate" in k.scope and e.plate is None and e.plates_known > 1:
+            # a record for one plate says nothing about another: never take one as current
+            return self.req(
+                "no_plate",
+                f"{e.printer} has {e.plates_known} plates: pass plate",
+                level=UNVERIFIED,
+            )
+        return None
 
-    cands = _candidates(conn, e)
-    nozzle_ok = [c for c in cands if "nozzle" not in k.scope or e.nozzle is None or c.nozzle is None
-                 or c.nozzle.same(e.nozzle)]
-    f = e.filament
-    exact = [c for c in nozzle_ok if f is None or _tier(c, f) == "filament"]
-    valid = [c for c in exact if stale(c) is None and not (c.valid_until and c.valid_until < now)]
-    if valid:
-        same_lot = [c for c in valid if f is None or c.filament is None or c.filament.lot_nr == f.lot_nr]
+    def nozzle_matches(self, c: Calibration) -> bool:
+        e = self.e
+        return (
+            "nozzle" not in self.k.scope
+            or e.nozzle is None
+            or c.nozzle is None
+            or c.nozzle.same(e.nozzle)
+        )
+
+    def is_valid(self, c: Calibration) -> bool:
+        return self.stale(c) is None and not (
+            c.valid_until and c.valid_until < self.now
+        )
+
+    def current(self, valid: Sequence[Calibration]) -> Requirement:
+        f = self.e.filament
+        same_lot = [
+            c
+            for c in valid
+            if f is None or c.filament is None or c.filament.lot_nr == f.lot_nr
+        ]
         best = (same_lot or valid)[0]  # newest first
-        if k.lot_sensitive and f is not None and not same_lot:
+        if self.k.lot_sensitive and f is not None and not same_lot:
             was = best.filament.lot_nr if best.filament else None
-            return req("new_lot", f"lot {f.lot_nr or 'unknown'} is new; #{best.id} was measured on lot "
-                                  f"{was or 'unknown'} ({_when(best.recorded_at)})", best)
-        return req("current", f"#{best.id} {_values_text(best)} ({best.method}, {_when(best.recorded_at)})",
-                   best, level=PASS)
-    if exact:
-        newest = exact[0]
-        inv = stale(newest)
+            return self.req(
+                "new_lot",
+                f"lot {f.lot_nr or 'unknown'} is new; #{best.id} was measured on lot "
+                f"{was or 'unknown'} ({_when(best.recorded_at)})",
+                best,
+            )
+        return self.req(
+            "current",
+            f"#{best.id} {_values_text(best)} ({best.method}, {_when(best.recorded_at)})",
+            best,
+            level=PASS,
+        )
+
+    def lapsed(self, newest: Calibration) -> Requirement:
+        """The newest exact record is no longer valid: invalidated or expired."""
+        inv = self.stale(newest)
         if inv is not None:
-            return req("invalidated", f"#{newest.id} predates {inv.trigger or 'maintenance'} on "
-                                      f"{_when(inv.at)}" + (f": {inv.reason}" if inv.reason else ""), newest, inv)
-        return req("expired", f"#{newest.id} expired {_when(newest.valid_until)}", newest)
-    if k.baseline == "assumed":
-        hits = [i for i in invs if i.hits(k, e.head)]
+            return self.req(
+                "invalidated",
+                f"#{newest.id} predates {inv.trigger or 'maintenance'} on "
+                f"{_when(inv.at)}" + (f": {inv.reason}" if inv.reason else ""),
+                newest,
+                inv,
+            )
+        return self.req(
+            "expired", f"#{newest.id} expired {_when(newest.valid_until)}", newest
+        )
+
+    def assumed(self) -> Requirement:
+        """No record, but the baseline is the factory state unless maintenance says otherwise."""
+        hits = [i for i in self.invs if i.hits(self.k, self.e.head)]
         if hits:
             inv = hits[-1]
-            return req("invalidated", f"never recorded since {inv.trigger or 'maintenance'} on {_when(inv.at)}"
-                                      + (f": {inv.reason}" if inv.reason else ""), None, inv)
-        return req("assumed", "no record; factory state assumed (no maintenance since)", level=PASS)
-    assert f is not None  # baseline required ⇒ filament in scope (catalog schema)
-    other_nozzle = [c for c in cands if _tier(c, f) == "filament" and c not in nozzle_ok]
-    if other_nozzle:
-        c = other_nozzle[0]
-        was = c.nozzle.label() if c.nozzle else "another nozzle"
-        now_n = e.nozzle.label() if e.nozzle else "unknown"
-        return req("new_nozzle", f"#{c.id} was measured with {was}; now {now_n}", c)
-    tiers = {_tier(c, f) for c in nozzle_ok}
-    if "vendor" in tiers:
-        return req("new_filament", f"{f.label()} has no record; other {f.vendor} {f.material} filaments do")
-    if "type" in tiers:
-        return req("new_vendor", f"no {f.material} from {f.vendor or 'this vendor'} recorded yet")
-    return req("new_material_type", f"no {f.material or 'material'} recorded yet ({f.label()})")
+            return self.req(
+                "invalidated",
+                f"never recorded since {inv.trigger or 'maintenance'} on {_when(inv.at)}"
+                + (f": {inv.reason}" if inv.reason else ""),
+                None,
+                inv,
+            )
+        return self.req(
+            "assumed",
+            "no record; factory state assumed (no maintenance since)",
+            level=PASS,
+        )
+
+    def unrecorded(
+        self, cands: Sequence[Calibration], nozzle_ok: Sequence[Calibration]
+    ) -> Requirement:
+        """No usable record for this filament/nozzle: say what is new."""
+        e = self.e
+        f = e.filament
+        assert f is not None  # baseline required ⇒ filament in scope (catalog schema)
+        other_nozzle = [
+            c for c in cands if _tier(c, f) == "filament" and c not in nozzle_ok
+        ]
+        if other_nozzle:
+            c = other_nozzle[0]
+            was = c.nozzle.label() if c.nozzle else "another nozzle"
+            now_n = e.nozzle.label() if e.nozzle else "unknown"
+            return self.req(
+                "new_nozzle", f"#{c.id} was measured with {was}; now {now_n}", c
+            )
+        tiers = {_tier(c, f) for c in nozzle_ok}
+        if "vendor" in tiers:
+            return self.req(
+                "new_filament",
+                f"{f.label()} has no record; other {f.vendor} {f.material} filaments do",
+            )
+        if "type" in tiers:
+            return self.req(
+                "new_vendor",
+                f"no {f.material} from {f.vendor or 'this vendor'} recorded yet",
+            )
+        return self.req(
+            "new_material_type",
+            f"no {f.material or 'material'} recorded yet ({f.label()})",
+        )
+
+
+def evaluate(
+    conn: sqlite3.Connection,
+    policy: CalibrationPolicy,
+    e: _Eval,
+    invs: Sequence[Invalidation],
+    now: str,
+) -> Requirement:
+    verdicts = _Evaluation(policy, e, invs, now)
+    unscoped = verdicts.unscoped()
+    if unscoped is not None:
+        return unscoped
+    cands = _candidates(conn, e)
+    nozzle_ok = [c for c in cands if verdicts.nozzle_matches(c)]
+    f = e.filament
+    exact = [c for c in nozzle_ok if f is None or _tier(c, f) == "filament"]
+    valid = [c for c in exact if verdicts.is_valid(c)]
+    if valid:
+        return verdicts.current(valid)
+    if exact:
+        return verdicts.lapsed(exact[0])
+    if e.kind.baseline == "assumed":
+        return verdicts.assumed()
+    return verdicts.unrecorded(cands, nozzle_ok)
 
 
 def _values_text(c: Calibration) -> str:
     vals = c.values or {}
-    return ", ".join(f"{k}={v:g}" if isinstance(v, float) else f"{k}={v}" for k, v in vals.items()) or "done"
+    return (
+        ", ".join(
+            f"{k}={v:g}" if isinstance(v, float) else f"{k}={v}"
+            for k, v in vals.items()
+        )
+        or "done"
+    )
 
 
 @dataclass
@@ -996,16 +1429,23 @@ class RequirementSet:
     def needed(self) -> list[Requirement]:
         return [r for r in self.items if r.level in (FAIL, WARN, UNVERIFIED)]
 
+    def _estimate(self) -> dict[str, Any]:
+        kinds = [r.kind for r in self.items if r.level in (FAIL, WARN) and r.kind]
+        return {
+            "minutes": sum(k.estimate_minutes for k in kinds),
+            "grams": sum(k.estimate_grams for k in kinds),
+        }
+
     def to_dict(self, *, all_items: bool = False) -> dict[str, Any]:
-        shown = [r for r in self.items if all_items or r.level in (FAIL, WARN, UNVERIFIED)]
-        need = [r for r in self.items if r.level in (FAIL, WARN)]
+        shown = [
+            r for r in self.items if all_items or r.level in (FAIL, WARN, UNVERIFIED)
+        ]
         return {
             "printer": self.printer,
             "overall": worst(r.level for r in self.items),
             "items": [r.to_dict() for r in shown],
             "skipped": self.skipped,
-            "estimate": {"minutes": sum(r.kind.estimate_minutes for r in need if r.kind),
-                         "grams": sum(r.kind.estimate_grams for r in need if r.kind)},
+            "estimate": self._estimate(),
         }
 
 
@@ -1017,28 +1457,53 @@ def worst(levels: Iterable[str]) -> str:
     return best
 
 
-def _head_evals(ctx: Ctx, p: FleetPrinter, head: Head, bound: Bound, plate: str | None) -> list[_Eval]:
+def _head_evals(
+    ctx: Ctx, p: FleetPrinter, head: Head, bound: Bound, plate: str | None
+) -> list[_Eval]:
     nozzle = current_nozzle(ctx.conn, p.name, head)
     return [
-        _Eval(kind=k, printer=p.name, head=head.label, nozzle=nozzle, plate=plate,
-              filament=bound.filament, filament_note=bound.note, plates_known=len(p.plates or ()))
+        _Eval(
+            kind=k,
+            printer=p.name,
+            head=head.label,
+            nozzle=nozzle,
+            plate=plate,
+            filament=bound.filament,
+            filament_note=bound.note,
+            plates_known=len(p.plates or ()),
+        )
         for k in ctx.catalog.kinds.values()
-        if k.applies_to(p.model) and ("head" in k.scope or "filament" in k.scope) and not k.mix_scoped
+        if k.applies_to(p.model)
+        and ("head" in k.scope or "filament" in k.scope)
+        and not k.mix_scoped
         and not ctx.policy.disabled(p.name, k.id)
     ]
 
 
 def _printer_evals(ctx: Ctx, p: FleetPrinter, plate: str | None) -> list[_Eval]:
     return [
-        _Eval(kind=k, printer=p.name, head=None, nozzle=None, plate=plate, filament=None,
-              filament_note=None, plates_known=len(p.plates or ()))
+        _Eval(
+            kind=k,
+            printer=p.name,
+            head=None,
+            nozzle=None,
+            plate=plate,
+            filament=None,
+            filament_note=None,
+            plates_known=len(p.plates or ()),
+        )
         for k in ctx.catalog.kinds.values()
-        if k.applies_to(p.model) and "head" not in k.scope and "filament" not in k.scope and not k.mix_scoped
+        if k.applies_to(p.model)
+        and "head" not in k.scope
+        and "filament" not in k.scope
+        and not k.mix_scoped
         and not ctx.policy.disabled(p.name, k.id)
     ]
 
 
-def _run(ctx: Ctx, p: FleetPrinter, evals: list[_Eval], now: str | None) -> list[Requirement]:
+def _run(
+    ctx: Ctx, p: FleetPrinter, evals: list[_Eval], now: str | None
+) -> list[Requirement]:
     invs = invalidations(ctx.conn, p.name)
     stamp = now or db.utc_now()
     out = [evaluate(ctx.conn, ctx.policy, e, invs, stamp) for e in evals]
@@ -1057,7 +1522,9 @@ def requirements(
     """What `printer` (one head, or every usable head) needs before printing with what is loaded."""
     p = fleet_printer(ctx.fleet, printer)
     if spool_id is not None and head is None:
-        raise CalibrationError(422, "spool needs head: which head would it be loaded on?")
+        raise CalibrationError(
+            422, "spool needs head: which head would it be loaded on?"
+        )
     heads = [fleet_head(p, head)] if head is not None else list(p.heads)
     plate_now = _plate(p, plate, required=False)
     evals: list[_Eval] = []
@@ -1090,7 +1557,9 @@ def filament_count(footer: Mapping[str, str]) -> int:
     return 1
 
 
-def footer_value(footer: Mapping[str, str], key: str, tool: int) -> tuple[str | None, str | None]:
+def footer_value(
+    footer: Mapping[str, str], key: str, tool: int
+) -> tuple[str | None, str | None]:
     """(raw value for `tool`, why it is unknown)."""
     raw = footer.get(key)
     if raw is None:
@@ -1102,8 +1571,10 @@ def footer_value(footer: Mapping[str, str], key: str, tool: int) -> tuple[str | 
     if len(parts) == 1:
         if tool == 0 or n == 1:
             return parts[0], None
-        return None, (f"`{key}` carries one value for {n} filaments (the first filament's); "
-                      f"T{tool + 1}'s value is not in the file")
+        return None, (
+            f"`{key}` carries one value for {n} filaments (the first filament's); "
+            f"T{tool + 1}'s value is not in the file"
+        )
     if tool >= len(parts):
         return None, f"`{key}` has no entry for T{tool + 1}"
     return parts[tool], None
@@ -1116,8 +1587,65 @@ class _FooterNote:
     mismatch: bool = False  # the G-code carries a value other than the recorded one
 
 
-def _compare_footer(r: Requirement, footer: Mapping[str, str], tool: int,
-                    policy: CalibrationPolicy) -> list[_FooterNote]:
+def _firmware_note(rec: Calibration, chk: GcodeCheck, want: float) -> _FooterNote:
+    """The G-code leaves `chk.value` to the firmware: say whether the record reached it."""
+    applied = rec.applied_to_firmware()
+    if applied:
+        return _FooterNote(
+            PASS,
+            f"`{chk.enabled_by}` is off: the firmware holds {chk.value} "
+            f"(#{rec.id} applied to {applied.get('target')} {_when(applied.get('at'))})",
+        )
+    return _FooterNote(
+        WARN,
+        f"`{chk.enabled_by}` is off: the G-code leaves {chk.value} to the "
+        f"firmware, and #{rec.id} ({chk.value}={want:g}) was never applied to "
+        "the printer",
+    )
+
+
+def _check_note(
+    r: Requirement,
+    rec: Calibration,
+    kind: Kind,
+    chk: GcodeCheck,
+    want: float,
+    footer: Mapping[str, str],
+    tool: int,
+    policy: CalibrationPolicy,
+) -> _FooterNote | None:
+    """The note for one gcode check, or None when the footer agrees with the record."""
+    if chk.enabled_by is not None:
+        flag, _ = footer_value(footer, chk.enabled_by, tool)
+        if flag is not None and flag.strip().lower() not in _TRUE:
+            return _firmware_note(rec, chk, want)
+    raw, why = footer_value(footer, chk.key, tool)
+    if raw is None:
+        return _FooterNote(UNVERIFIED, why or f"no `{chk.key}`")
+    try:
+        got = float(raw)
+    except ValueError:
+        return _FooterNote(UNVERIFIED, f"`{chk.key}` = {raw!r} is not a number")
+    ok = (
+        abs(got - want) <= chk.tolerance
+        if chk.compare == "eq"
+        else got <= want + chk.tolerance
+    )
+    if ok:
+        return None
+    sign = "≠" if chk.compare == "eq" else ">"
+    level = _POLICY_LEVEL[policy.level(r.printer, kind.id, "gcode_mismatch")]
+    return _FooterNote(
+        level,
+        f"G-code {chk.key} {got:g} {sign} recorded {want:g} (#{rec.id}, "
+        f"{_when(rec.recorded_at)})",
+        mismatch=True,
+    )
+
+
+def _compare_footer(
+    r: Requirement, footer: Mapping[str, str], tool: int, policy: CalibrationPolicy
+) -> list[_FooterNote]:
     """One note per gcode check of the kind against the record r stands on."""
     out: list[_FooterNote] = []
     rec, kind = r.record, r.kind
@@ -1127,34 +1655,9 @@ def _compare_footer(r: Requirement, footer: Mapping[str, str], tool: int,
         want = rec.values.get(chk.value)
         if not isinstance(want, (int, float)):
             continue
-        if chk.enabled_by is not None:
-            flag, _ = footer_value(footer, chk.enabled_by, tool)
-            if flag is not None and flag.strip().lower() not in _TRUE:
-                applied = rec.applied_to_firmware()
-                if applied:
-                    out.append(_FooterNote(PASS, f"`{chk.enabled_by}` is off: the firmware holds {chk.value} "
-                                      f"(#{rec.id} applied to {applied.get('target')} {_when(applied.get('at'))})"))
-                else:
-                    out.append(_FooterNote(WARN, f"`{chk.enabled_by}` is off: the G-code leaves {chk.value} to the "
-                                      f"firmware, and #{rec.id} ({chk.value}={want:g}) was never applied to "
-                                      "the printer"))
-                continue
-        raw, why = footer_value(footer, chk.key, tool)
-        if raw is None:
-            out.append(_FooterNote(UNVERIFIED, why or f"no `{chk.key}`"))
-            continue
-        try:
-            got = float(raw)
-        except ValueError:
-            out.append(_FooterNote(UNVERIFIED, f"`{chk.key}` = {raw!r} is not a number"))
-            continue
-        ok = abs(got - want) <= chk.tolerance if chk.compare == "eq" else got <= want + chk.tolerance
-        if ok:
-            continue
-        sign = "≠" if chk.compare == "eq" else ">"
-        level = _POLICY_LEVEL[policy.level(r.printer, kind.id, "gcode_mismatch")]
-        out.append(_FooterNote(level, f"G-code {chk.key} {got:g} {sign} recorded {want:g} (#{rec.id}, "
-                           f"{_when(rec.recorded_at)})", mismatch=True))
+        note = _check_note(r, rec, kind, chk, want, footer, tool, policy)
+        if note is not None:
+            out.append(note)
     return out
 
 
@@ -1172,23 +1675,73 @@ class GateResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "check": "calibration_current",
-            "printer": self.printer, "file": self.file, "gcode_sha": self.gcode_sha,
+            "printer": self.printer,
+            "file": self.file,
+            "gcode_sha": self.gcode_sha,
             "overall": self.overall,
             "items": [r.to_dict() for r in self.items],
         }
 
 
-def parse_accept(values: Iterable[str], reason: str | None, catalog: Catalog) -> dict[str, str]:
+def parse_accept(
+    values: Iterable[str], reason: str | None, catalog: Catalog
+) -> dict[str, str]:
     """`calibration:<kind>` (or a bare kind) → {kind: reason}; reason is mandatory."""
     out: dict[str, str] = {}
     for raw in values:
         kind = raw.strip()
-        kind = kind[len(ACCEPT_PREFIX):] if kind.startswith(ACCEPT_PREFIX) else kind
+        kind = kind[len(ACCEPT_PREFIX) :] if kind.startswith(ACCEPT_PREFIX) else kind
         _kind(catalog, kind)
         if not reason or not reason.strip():
             raise CalibrationError(422, f"accepting calibration:{kind} needs a reason")
         out[kind] = reason.strip()
     return out
+
+
+def _tool_evals(
+    ctx: Ctx,
+    p: FleetPrinter,
+    used_tools: Sequence[int],
+    spools: Mapping[int, int],
+    plate: str | None,
+) -> tuple[list[Requirement], list[tuple[int, _Eval]]]:
+    """Per used tool: a `no_head` requirement, or the evaluations for its bound head."""
+    by_index = {h.index: h for h in p.heads}
+    items: list[Requirement] = []
+    head_evals: list[tuple[int, _Eval]] = []
+    for tool in sorted(set(used_tools)):
+        h = by_index.get(tool)
+        if h is None or not h.usable:
+            why = (
+                f"{p.name} has no head T{tool + 1}"
+                if h is None
+                else f"{p.name} {h.label} is not usable: {h.reason or 'see fleet'}"
+            )
+            items.append(
+                Requirement(None, p.name, None, "no_head", UNVERIFIED, why, tool=tool)
+            )
+            continue
+        if tool in spools:
+            bound = Bound(Filament.from_spool(_spool(ctx.spoolman, spools[tool])))
+        else:
+            bound = bound_filament(ctx.spoolman, p.name, h)
+        head_evals += [(tool, e) for e in _head_evals(ctx, p, h, bound, plate)]
+    return items, head_evals
+
+
+def _apply_footer_notes(
+    r: Requirement, footer: Mapping[str, str], tool: int, policy: CalibrationPolicy
+) -> None:
+    """Fold the G-code footer comparison into a requirement that stands on a record."""
+    if r.status not in ("current", "new_lot"):
+        return
+    notes = _compare_footer(r, footer, tool, policy)
+    if not notes:
+        return
+    r.level = worst([r.level, *(n.level for n in notes if n.level != OFF)])
+    r.detail += "; " + "; ".join(n.note for n in notes)
+    if r.status == "current" and any(n.mismatch and n.level != OFF for n in notes):
+        r.status = "gcode_mismatch"
 
 
 def check_gcode(
@@ -1211,21 +1764,7 @@ def check_gcode(
         _kind(ctx.catalog, kind)
     spools = dict(spools or {})
     plate_now = _plate(p, plate, required=False)
-    by_index = {h.index: h for h in p.heads}
-    items: list[Requirement] = []
-    head_evals: list[tuple[int, _Eval]] = []
-    for tool in sorted(set(used_tools)):
-        h = by_index.get(tool)
-        if h is None or not h.usable:
-            why = f"{p.name} has no head T{tool + 1}" if h is None else \
-                f"{p.name} {h.label} is not usable: {h.reason or 'see fleet'}"
-            items.append(Requirement(None, p.name, None, "no_head", UNVERIFIED, why, tool=tool))
-            continue
-        if tool in spools:
-            bound = Bound(Filament.from_spool(_spool(ctx.spoolman, spools[tool])))
-        else:
-            bound = bound_filament(ctx.spoolman, p.name, h)
-        head_evals += [(tool, e) for e in _head_evals(ctx, p, h, bound, plate_now)]
+    items, head_evals = _tool_evals(ctx, p, used_tools, spools, plate_now)
     invs = invalidations(ctx.conn, p.name)
     stamp = now or db.utc_now()
     for tool, e in head_evals:
@@ -1233,35 +1772,51 @@ def check_gcode(
         r.tool = tool
         if r.level == OFF:
             continue
-        notes = _compare_footer(r, footer, tool, ctx.policy) if r.status in ("current", "new_lot") else []
-        if notes:
-            r.level = worst([r.level, *(n.level for n in notes if n.level != OFF)])
-            r.detail += "; " + "; ".join(n.note for n in notes)
-            if r.status == "current" and any(n.mismatch and n.level != OFF for n in notes):
-                r.status = "gcode_mismatch"
+        _apply_footer_notes(r, footer, tool, ctx.policy)
         items.append(r)
-    items += [r for r in (evaluate(ctx.conn, ctx.policy, e, invs, stamp) for e in _printer_evals(ctx, p, plate_now))
-              if r.level != OFF]
+    items += [
+        r
+        for r in (
+            evaluate(ctx.conn, ctx.policy, e, invs, stamp)
+            for e in _printer_evals(ctx, p, plate_now)
+        )
+        if r.level != OFF
+    ]
     result = GateResult(p.name, file, gcode_sha, items)
     _accept(ctx, result, accept)
     return result
 
 
 def _accept(ctx: Ctx, result: GateResult, accept: Mapping[str, str]) -> None:
-    hits = [r for r in result.items if r.level == FAIL and r.kind is not None and r.kind.id in accept]
+    hits = [
+        r
+        for r in result.items
+        if r.level == FAIL and r.kind is not None and r.kind.id in accept
+    ]
     if not hits:
         return
     with db.transaction(ctx.conn):
         for r in hits:
             assert r.kind is not None
             reason = accept[r.kind.id]
-            ev.emit(ctx.conn, "calibration.accepted",
-                    f"{result.printer}/{r.head}" if r.head else result.printer,
-                    {"printer": result.printer, "head": r.head, "tool": r.tool, "kind": r.kind.id,
-                     "status": r.status, "detail": r.detail, "reason": reason,
-                     "gcode_sha": result.gcode_sha, "file": result.file,
-                     "record_id": r.record.id if r.record else None},
-                    ctx.actor)
+            ev.emit(
+                ctx.conn,
+                "calibration.accepted",
+                f"{result.printer}/{r.head}" if r.head else result.printer,
+                {
+                    "printer": result.printer,
+                    "head": r.head,
+                    "tool": r.tool,
+                    "kind": r.kind.id,
+                    "status": r.status,
+                    "detail": r.detail,
+                    "reason": reason,
+                    "gcode_sha": result.gcode_sha,
+                    "file": result.file,
+                    "record_id": r.record.id if r.record else None,
+                },
+                ctx.actor,
+            )
             r.level = WARN
             r.accepted = reason
             r.detail += f"; accepted by {ctx.actor}: {reason}"
