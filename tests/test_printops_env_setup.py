@@ -55,10 +55,13 @@ p1s:
 
 PROBE_OK = (
     "home=/home/me\narch=aarch64\ncores=4\nload=0.30\nmem_mb=8000\n"
-    "docker=Docker version 27.1.1, build abc\ncompose=2.29.1\nos=Debian GNU/Linux 12\n"
+    "docker=Docker version 27.1.1, build abc\ncompose=2.29.1\ndocker_ok=yes\nrsync=/usr/bin/rsync\n"
+    "os=Debian GNU/Linux 12\n"
 )
 PROBE_BUSY = PROBE_OK.replace("load=0.30", "load=7.50")
 PROBE_NO_DOCKER = PROBE_OK.replace("docker=Docker version 27.1.1, build abc", "docker=")
+PROBE_NO_DAEMON_ACCESS = PROBE_OK.replace("docker_ok=yes", "docker_ok=")
+PROBE_NO_RSYNC = PROBE_OK.replace("rsync=/usr/bin/rsync", "rsync=")
 
 
 @pytest.fixture(autouse=True)
@@ -728,6 +731,52 @@ def test_install_failure_leaves_no_config(
     assert (
         not config_path().exists() and len(rec.calls) == 1
     )  # probe only: no token minted
+
+
+def test_a_host_whose_docker_daemon_is_not_reachable_is_not_touched(cfg_home: Path) -> None:
+    """`docker --version` and `docker compose version` work without the daemon (and for a user outside
+    the docker group): the old check passed, the deploy failed halfway, and the hint blamed a container."""
+    env, out, rec, drec = make_env(cfg_home, runner=Recorder(PROBE_NO_DAEMON_ACCESS))
+    with pytest.raises(ThreeDError, match="cannot talk to its daemon") as err:
+        env_setup.run(["--no-input", "--spoolman", "ssh:me@nas.lan"], env)
+    assert "usermod -aG docker" in err.value.render() and "docker logs" not in err.value.render()
+    assert any("daemon NOT reachable" in line for line in out)
+    assert not drec.calls and not config_path().exists()
+
+
+def test_an_ssh_host_without_rsync_is_refused_before_any_step_runs(cfg_home: Path) -> None:
+    env, _, _, drec = make_env(cfg_home, runner=Recorder(PROBE_NO_RSYNC))
+    with pytest.raises(ThreeDError, match="no rsync") as err:
+        env_setup.run(["--no-input", "--spoolman", "ssh:me@nas.lan"], env)
+    assert "apt install rsync" in err.value.render() and "--spoolman script" in err.value.render()
+    assert not drec.calls  # not even the mkdir step: no half-done install
+
+
+def test_this_machine_needs_no_rsync(cfg_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_health(monkeypatch, [])
+    env, _, _, drec = make_env(cfg_home, runner=Recorder(PROBE_NO_RSYNC))
+    assert env_setup.run(["--no-input", "--spoolman", "local"], env) == 0  # compose builds from the checkout
+    assert drec.calls
+
+
+def test_the_probe_script_reports_docker_daemon_access_and_rsync(tmp_path: Path) -> None:
+    """The probe really runs on the host: shims stand in for docker and rsync."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in (
+        ("docker", 'case "$1" in info) exit "${FAKE_DOCKER_INFO:-0}" ;; --version) echo "Docker version 27.1.1, build x" ;; '
+                   "compose) echo 2.29.1 ;; esac"),
+        ("rsync", "exit 0"),
+    ):
+        (bindir / name).write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        (bindir / name).chmod(0o755)
+    base = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+    up = env_setup.parse_probe(subprocess.run(["bash", "-c", env_setup.PROBE_SCRIPT], env=base, capture_output=True,
+                                              text=True, check=True).stdout)
+    assert up.docker == "27.1.1" and up.docker_access and up.rsync
+    down = env_setup.parse_probe(subprocess.run(["bash", "-c", env_setup.PROBE_SCRIPT], env={**base, "FAKE_DOCKER_INFO": "1"},
+                                                capture_output=True, text=True, check=True).stdout)
+    assert down.docker == "27.1.1" and not down.docker_access
 
 
 def test_a_host_without_docker_is_not_touched(cfg_home: Path) -> None:

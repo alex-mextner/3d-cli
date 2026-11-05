@@ -158,6 +158,8 @@ class HostProbe:
     docker: str
     compose: str
     os_name: str
+    rsync: bool = False  # rsync is on the host (an ssh target is filled by rsync)
+    docker_access: bool = False  # `docker info` answers for this user (daemon up, user may talk to it)
 
     @property
     def busy(self) -> bool:
@@ -168,7 +170,9 @@ class HostProbe:
             f"{self.os_name or 'Linux'} {self.arch}, {self.cores} cores, {self.mem_mb} MB RAM, "
             f"load {self.load1:.2f}"
             + (" (BUSY)" if self.busy else "")
-            + f", docker {self.docker or 'MISSING'}, compose {self.compose or 'MISSING'}"
+            + f", docker {self.docker or 'MISSING'}"
+            + (" (daemon NOT reachable)" if self.docker and not self.docker_access else "")
+            + f", compose {self.compose or 'MISSING'}"
         )
 
 
@@ -466,6 +470,8 @@ PROBE_SCRIPT = (
     ' printf "mem_mb=%s\\n" "$(awk \'/MemTotal/ {print int($2/1024)}\' /proc/meminfo)";'
     ' printf "docker=%s\\n" "$(docker --version 2>/dev/null)";'
     ' printf "compose=%s\\n" "$(docker compose version --short 2>/dev/null)";'
+    ' printf "docker_ok=%s\\n" "$(docker info >/dev/null 2>&1 && echo yes)";'
+    ' printf "rsync=%s\\n" "$(command -v rsync 2>/dev/null)";'
     ' printf "os=%s\\n" "$(. /etc/os-release 2>/dev/null && printf %s "$PRETTY_NAME")"'
 )
 
@@ -488,6 +494,8 @@ def parse_probe(text: str) -> HostProbe:
         docker=kv.get("docker", "").removeprefix("Docker version ").split(",")[0],
         compose=kv.get("compose", ""),
         os_name=kv.get("os", ""),
+        rsync=bool(kv.get("rsync")),
+        docker_access=kv.get("docker_ok") == "yes",
     )
 
 
@@ -583,13 +591,26 @@ def _mint_remediation(by_hand: str) -> list[str]:
     return [f"Run it by hand: {by_hand}", "then `3d init --env --api URL --token TOKEN`."]
 
 
-def _require_docker(pr: HostProbe, label: str) -> None:
-    if pr.docker and pr.compose:
-        return
-    raise ThreeDError(
-        f"{label} has no {'docker' if not pr.docker else 'docker compose plugin'}", command=CLI_NAME,
-        remediation=[f"Install Docker Engine with the compose plugin there: {DOCKER_INSTALL}",
-                     "then run this again. (3d never installs docker for you.)"])
+def _require_host_tools(pr: HostProbe, label: str, host: str) -> None:
+    """docker + compose + a reachable daemon on the host, and rsync when files are copied to it (an ssh
+    host). The failures come before any step runs: a half-done install and a "docker logs" hint for a
+    container that was never created are worse than a refusal."""
+    if not (pr.docker and pr.compose):
+        raise ThreeDError(
+            f"{label} has no {'docker' if not pr.docker else 'docker compose plugin'}", command=CLI_NAME,
+            remediation=[f"Install Docker Engine with the compose plugin there: {DOCKER_INSTALL}",
+                         "then run this again. (3d never installs docker for you.)"])
+    if not pr.docker_access:
+        raise ThreeDError(
+            f"{label} has docker but this user cannot talk to its daemon (`docker info` failed)", command=CLI_NAME,
+            remediation=["Start the daemon there (`sudo systemctl start docker`) and let the ssh user use it: "
+                         "`sudo usermod -aG docker USER`, then log in again.",
+                         "then run this again."])
+    if host and not pr.rsync:
+        raise ThreeDError(
+            f"{label} has no rsync: 3d copies the build context to an ssh host with it", command=CLI_NAME,
+            remediation=["Install it there (`sudo apt install rsync`), then run this again.",
+                         "Or generate a script to run on that host instead: 3d init --env --spoolman script"])
 
 
 def _warn_if_busy(pr: HostProbe, label: str, env: Env, opts: Options) -> None:
@@ -640,7 +661,7 @@ def install(host: str, label: str, env: Env, opts: Options) -> tuple[str, str | 
     """Deploy to `host` ("" = this machine); returns (api_url, token or None on --dry-run)."""
     pr = probe(host, env)
     env.say(f"{label}: {pr.describe()}")
-    _require_docker(pr, label)
+    _require_host_tools(pr, label, host)
     _warn_if_busy(pr, label, env, opts)
     root = _repo_root(env)
     cfg = _deploy_config(host, pr, env, opts)
