@@ -201,12 +201,19 @@ def _timer_script(cfg: DeployConfig, src: str) -> str:
     return f"( {timer} && {linger} ) || echo 'note: no systemd --user here; the daily backup timer was not installed'"
 
 
+def _rsync_host(host: str) -> str:
+    """`USER@HOST` as rsync wants it before the `:path`: an IPv6 literal in brackets (rsync splits
+    `me@2001:db8::7:/dir` at the first colon and syncs to the host `2001`). ssh takes it bare."""
+    user, at, name = host.rpartition("@")
+    return f"{user}{at}[{name}]" if ":" in name and not name.startswith("[") else host
+
+
 def _sync_step(cfg: DeployConfig, dry_run: bool) -> Step:
     sync = [p for p in SYNC_PATHS if (cfg.repo_root / p).exists()]
     rsync = ["rsync", "-az", "--relative", "--delete", "--exclude", "__pycache__", "--exclude", "*.pyc"]
     if dry_run:
         rsync += ["--dry-run", "--itemize-changes"]
-    rsync += [*sync, f"{cfg.host}:{cfg.remote_dir}/src/"]
+    rsync += [*sync, f"{_rsync_host(cfg.host)}:{cfg.remote_dir}/src/"]
     return Step("sync build context" + (" (dry run: changes only)" if dry_run else ""), rsync, read_only=dry_run)
 
 

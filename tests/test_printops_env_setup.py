@@ -824,7 +824,7 @@ def test_an_ssh_only_alias_is_resolved_for_the_health_check_and_the_config(
     assert any(c[0] == "rsync" and c[-1].startswith("me@printops-server:") for c in drec.calls)  # ssh keeps the alias
 
 
-def test_http_host_falls_back_to_the_ssh_target_name_and_brackets_ipv6(cfg_home: Path) -> None:
+def test_http_host_falls_back_to_the_ssh_target_name_and_keeps_an_ipv6_literal_bare(cfg_home: Path) -> None:
     class Failing:
         def __call__(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(argv, 255, "", "ssh: bad config")
@@ -833,6 +833,22 @@ def test_http_host_falls_back_to_the_ssh_target_name_and_brackets_ipv6(cfg_home:
     assert env_setup._http_host("me@nas.lan", env) == "nas.lan"
     env6, _, _, _ = make_env(cfg_home, runner=Recorder(ssh_hostnames={"v6": "2001:db8::7"}))
     assert env_setup._http_host("v6", env6) == "2001:db8::7"
+
+
+def test_an_ipv6_literal_target_is_bracketed_where_rsync_and_http_need_it(
+    cfg_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rsync splits `me@2001:db8::7:/dir` at the first colon; ssh wants the address bare."""
+    log: list[str] = []
+    _patch_health(monkeypatch, log)
+    env, _, rec, drec = make_env(cfg_home)
+    assert env_setup.run(["--no-input", "--spoolman", "ssh:me@2001:db8::7"], env) == 0
+    assert any(c[0] == "rsync" and c[-1] == "me@[2001:db8::7]:/home/me/printops/src/" for c in drec.calls)
+    ssh_steps = [c for c in drec.calls if c[0] == "ssh"]
+    assert ssh_steps and all("me@2001:db8::7" in c for c in ssh_steps)  # the ssh steps take it bare
+    assert log[0] == "wait http://[2001:db8::7]:8765"
+    assert "api: http://[2001:db8::7]:8765" in config_path().read_text()
+    assert "me@2001:db8::7" in rec.calls[0]
 
 
 def test_token_names_stay_within_the_token_name_limit(monkeypatch: pytest.MonkeyPatch) -> None:
