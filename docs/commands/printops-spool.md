@@ -34,7 +34,7 @@ a bookmark of what it last processed. 3d-api catches up with every change made i
 
 The interval's mid equals Spoolman's `remaining_weight` (± 0.5 g) — that is the invariant `spool drift`
 checks; its extra field `remaining_confidence_g` caches the ±. A weight typed or measured in the Spoolman UI
-becomes an anchor (`source weigh`, ± scale and tare), usage Moonraker booked into Spoolman a
+becomes an anchor (`source weigh`, ± scale and tare) when Spoolman's own `/measure` made it, a `manual` estimate when it was typed into the edit form, usage Moonraker booked into Spoolman a
 `moonraker_live` row, both by `spool-sync`, never written back to Spoolman.
 
 ## Tares (empty-spool weights)
@@ -74,7 +74,7 @@ No tare → `measure` refuses (409) and says why; pass `--tare G` (recorded for 
 3d printops spool measure ID GROSS_G [--tare G [--tare-source TEXT]] [--scale-sigma G] [--note TEXT]
 3d printops spool empty ID [--note TEXT]
 3d printops spool import-owned FILE [--location LOC] [--project NAME] [--apply]
-3d printops spool drift [--spool ID] [--heal]
+3d printops spool drift [--spool ID] [--heal | --confirm-deleted]
 ```
 
 Every action takes `--json` (the API answer), `--api URL`, `--token TOKEN`.
@@ -282,7 +282,7 @@ Spoolman's native vendor empty spool weight.
 ## Keeping Spoolman and PrintOps in step
 
 ```
-3d printops spool drift [--spool ID] [--heal] [--json]
+3d printops spool drift [--spool ID] [--heal | --confirm-deleted] [--json]
 ```
 
 Why this exists: the Spoolman web UI (your inventory and weighing) and Moonraker's `[spoolman]` change spools
@@ -328,9 +328,9 @@ Kinds: `remaining`, `unknown_spool`, `spool_returned`, `spool_deleted`, `archive
 | GET / POST | `/v1/tares` | read / write | `vendor` / `{vendor, tare_g, source, spool_kind?, net_g?, sigma_g?, note?}` |
 | GET | `/v1/lint` | read | `weigh_days` — the data rules below |
 | GET | `/v1/spool-sync` | read | `spool` — live drift report: `{ok, tolerance_g, checked, drift, healable, unhealable, drifts[{spool_id, kind, summary, healable, blocks, action, detail}], last_pass, interval_s}` |
-| GET | `/v1/spool-sync/status` | none | what the scheduled pass last saw, no Spoolman request: `{enabled, interval_s, last_pass, anomalies_open}` |
+| GET | `/v1/spool-sync/status` | none | what the scheduled pass last saw, no Spoolman request: `{enabled, interval_s, last_pass, age_s, stale, anomalies_open}` (`stale`: on, but no pass completed for several intervals) |
 | POST | `/v1/spool-sync/heal` | write | `{spool_id?}` — heal now (what the schedule does); `{ok, before, healed, failed, after}` |
-| POST | `/v1/spool-sync/confirm-deleted` | write | — record every spool Spoolman answers 404 for as deleted (after `spoolman_empty`); `{confirmed, still_listed, after}` |
+| POST | `/v1/spool-sync/confirm-deleted` | write | — record every spool Spoolman answers 404 for as deleted (after `spoolman_empty`); `{confirmed, still_present, may_be_other_spools, after}` |
 
 Errors: `{"detail": message, "info": {...}}` — 404 unknown spool/printer/slot/location, 409
 unusable head / occupied slot / archived spool / no tare / duplicate import key, 422 invalid

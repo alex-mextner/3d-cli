@@ -209,6 +209,33 @@ def test_a_wiped_spoolman_heals_nothing_until_the_owner_confirms_the_deletions(
     assert "healed 1 difference(s)" in healed.stdout and "in step" in healed.stdout
 
 
+def test_confirm_deleted_refuses_to_be_combined_and_lists_ids_that_may_have_changed(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """`--confirm-deleted` is a bulk decision: with `--spool` or `--heal` it is a usage error (exit 2) that
+    names the conflict and writes nothing; and after it, the known ids Spoolman still lists are named as
+    possibly different spools, because a wiped Spoolman numbers its new spools from 1 again."""
+    ids = [receive(shop) for _ in range(5)]
+    for sid in ids[:4]:
+        shop.spoolman.delete("spool", sid)
+    ui_edit(shop, ids[4], 412)
+    writes = len(shop.spoolman.writes())
+
+    for extra in (["--spool", str(ids[4])], ["--heal"]):
+        bad = cli(tmp_path, shop, "printops", "spool", "drift", "--confirm-deleted", *extra)
+        assert bad.returncode == 2, (extra, bad.stdout, bad.stderr)
+        assert "--confirm-deleted cannot be combined with " + extra[0] in bad.stderr
+    assert len(shop.spoolman.writes()) == writes
+    assert list(shop.spoolman.items["spool"]) == [ids[4]]  # nothing was deleted or recorded
+
+    done = cli(tmp_path, shop, "printops", "spool", "drift", "--confirm-deleted", "--json")
+    assert done.returncode == 1 or done.returncode == 0, done.stderr
+    body = json.loads(done.stdout)
+    assert sorted(body["confirmed"]) == ids[:4] and body["may_be_other_spools"] == [ids[4]]
+    text = cli(tmp_path, shop, "printops", "spool", "drift", "--confirm-deleted")
+    assert f"ids that may now belong to different spools: check them in Spoolman: #{ids[4]}" in text.stdout
+
+
 def test_drift_heal_needs_the_write_scope_and_drift_the_read_scope(
     tmp_path: Path, shop: LiveApi
 ) -> None:

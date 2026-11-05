@@ -830,7 +830,8 @@ def test_confirming_the_deletions_records_them_and_lifts_the_guard(world: World)
     with spool_sync.PASS_LOCK:
         result = spool_sync.confirm_deleted(world.conn, world.sm)
 
-    assert sorted(result.confirmed) == gone and result.still_listed == []
+    assert sorted(result.confirmed) == gone and result.still_present == []
+    assert result.may_be_other_spools == [alive]  # Spoolman still lists it: check it, ids can collide
     deleted = world.events("spool.deleted")
     assert sorted(int(e[1].split(":")[1]) for e in deleted) == gone
     assert "spoolman_empty" not in world.kinds()
@@ -846,3 +847,47 @@ def test_confirming_leaves_a_spool_that_spoolman_still_has(world: World) -> None
     assert world.conn.execute(
         "SELECT COUNT(*) FROM spool_sync WHERE state = 'deleted'"
     ).fetchone()[0] == len(gone)
+
+
+# -- review fixes, round 3 ----------------------------------------------------------------------------------------
+
+
+def test_an_archived_spool_that_leaves_its_slot_for_free_text_books_the_move_and_the_unload(
+    world: World,
+) -> None:
+    """In one UI save a spool in a slot gets the text "bin" and is archived: the bookmark moves to "bin",
+    so the unload of the slot must be booked then, or exposure charges the slot's jobs to it for good."""
+    sid = world.receive()
+    spools.load(world.ctx, "u1", "T3", sid, printer_write=False)
+    world.fake.update("spool", sid, {"archived": True, "location": "bin"})
+
+    world.heal()
+
+    assert world.detect() == []
+    assert _slot_events(world, sid)[-1] == ("slot.unloaded", "slot:u1/T3")
+    moved = [e for e in world.events("spool.moved") if e[1] == f"spool:{sid}"][-1][2]
+    assert moved["from"] == "slot:u1/T3" and moved["via"] == "spoolman"
+    world.heal()
+    assert len([e for e in _slot_events(world, sid) if e[0] == "slot.unloaded"]) == 1  # booked once
+
+
+@pytest.mark.parametrize(
+    ("anchored", "was", "now", "weighing"),
+    [
+        (True, "2026-11-01T10:00:00Z", "2026-11-02T10:00:00Z", True),  # /measure moved last_used forward
+        (True, None, "2026-11-02T10:00:00Z", True),
+        (True, "2026-11-01T10:00:00Z", "2026-11-01T10:00:00Z", False),  # PATCH of the edit form
+        (True, "2026-11-01T10:00:00Z", None, False),  # last_used cleared: not a weighing
+        (False, "2026-11-01T10:00:00Z", "2026-11-02T10:00:00Z", False),  # never anchored: nothing to compare
+    ],
+)
+def test_only_a_forward_move_of_last_used_on_an_anchored_spool_is_a_weighing(
+    anchored: bool, was: str | None, now: str | None, weighing: bool
+) -> None:
+    from printops.spool_mirror import PRESENT, Seen
+
+    spool = {"id": 1, "last_used": now}
+    seen = Seen(1, PRESENT, 500.0, was, False, "")
+    assert spool_sync._is_weighing(spool, seen, "edit", anchored) is weighing
+    assert spool_sync._is_weighing(spool, seen, "first_sync", anchored) is False
+    assert spool_sync._is_weighing(spool, None, "edit", anchored) is False

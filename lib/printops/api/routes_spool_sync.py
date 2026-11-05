@@ -13,7 +13,7 @@
                                   scope write. The owner's decision after `spoolman_empty` (most known
                                   spools missing at once: a wiped Spoolman or a wrong URL, so nothing is
                                   healed): record every spool Spoolman answers 404 for as deleted.
-                                  {confirmed[], still_listed[], after}
+                                  {confirmed[], still_present[], may_be_other_spools[], after}
 
 BACKGROUND (router lifespan): every PRINTOPS_SPOOL_SYNC_S seconds (default 60, floor 10, 0 turns it
 off) one pass runs `printops.spool_sync.run_pass` against Spoolman through the one write path: it

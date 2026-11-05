@@ -25,8 +25,9 @@ THE INVARIANT (what `detect` checks, `heal` restores; tolerance `TOLERANCE_G`):
 
 WHAT A CHANGE IN SPOOLMAN BECOMES (weight): a drop of a spool loaded in a Moonraker-`[spoolman]`
 printer after `last_used` moved is that printer's usage → a `moonraker_live` delta row; any other
-change (a typed remaining weight, a /measure, a first sight, a rise) is a weighing → a `weigh`
-anchor whose ± is the scale's and the tare's. The classification only labels the ledger row; the
+change is an anchor: a `weigh` one (± the scale's and the tare's) when Spoolman's own /measure made it
+(`last_used` moved forward on an anchored spool), a `manual` estimate (± 10 %, at least 20 g) for a typed
+remaining weight, a first sight or a ledger that moved alone. The classification only labels the ledger row; the
 resulting mid is Spoolman's either way, so a wrong label can never leave the two apart.
 
 INVARIANTS:
@@ -39,7 +40,8 @@ INVARIANTS:
     heal is a pending difference of the next pass, never lost.
   - Deleting is recorded only after a 404 for that very spool, and never when more than
     `MISSING_FRACTION` of the known spools look gone at once (a wiped or wrong Spoolman): that is
-    `spoolman_empty`, which only a person resolves. A Spoolman restored from a backup (its
+    `spoolman_empty`: NO spool is healed while it holds, and only a person resolves it
+    (`confirm_deleted`, which also names the known ids Spoolman still lists: they may be new spools). A Spoolman restored from a backup (its
     `last_used` went backwards) is `spoolman_rolled_back`: nothing is healed on that spool.
   - Drifts that cannot self-heal (`healable` False) or whose heal failed become anomalies of scope
     `spools` (`run_pass`); they clear on their own when the condition does.
@@ -363,12 +365,22 @@ def _weight_cause(
     return "usage" if _is_usage(ctx, s, m, now, mid) else "edit"
 
 
-def _is_weighing(s: Mapping[str, Any], m: Seen | None, cause: str) -> bool:
-    """A weight change that Spoolman's own `/measure` or `/use` made moves `last_used`; a number typed
-    into the edit form (PATCH), a first sight, or a ledger that moved by itself does not: those are
-    estimates, not weighings."""
+def _is_weighing(
+    s: Mapping[str, Any], m: Seen | None, cause: str, anchored: bool
+) -> bool:
+    """A weight change made by Spoolman's own `/measure` moves `last_used` FORWARD; a number typed into
+    the edit form (PATCH), a first sight, a ledger that moved by itself, a spool never anchored (nothing
+    to compare against) or a cleared `last_used` are estimates, not weighings. Spoolman's `/use` moves
+    `last_used` too and cannot be told apart from `/measure` by the state alone: a usage of a spool outside
+    a single-head Moonraker printer is therefore still recorded as a weighing."""
     last_used = str(s["last_used"]) if s.get("last_used") else None
-    return cause == "edit" and m is not None and last_used != m.last_used
+    return (
+        cause == "edit"
+        and anchored
+        and m is not None
+        and last_used is not None
+        and (m.last_used is None or last_used > m.last_used)
+    )
 
 
 def _anchor_kind(
@@ -482,7 +494,7 @@ def _plan_weight(
             before,
             now,
             f"{verb}: {have} → Spoolman {now:.1f} g (spool-sync)",
-            _is_weighing(s, m, cause),
+            _is_weighing(s, m, cause, est.anchored),
         ),
     )
 
@@ -592,6 +604,22 @@ def _archived_in_slot(s: Mapping[str, Any], key: str) -> tuple[Drift, Step]:
     return drift, step
 
 
+def _archived_left_slot(s: Mapping[str, Any], base: Seen) -> tuple[Drift, Step]:
+    """An archived spool that was in a slot and now carries text PrintOps does not know: the bookmark
+    moves to that text, so the move and the unload of the slot are booked now or never."""
+    text = _text(s)
+    step = _placement_step(base.location, None, ["moved"])
+    drift = Drift(
+        int(s["id"]),
+        KIND_LOCATION,
+        f"{_name(s)} is archived and left slot {slot_of_location(base.location)} for {text!r}",
+        True,
+        "record the move and free the slot",
+        {"change": ["moved"], "from": base.location, "to": text},
+    )
+    return drift, step
+
+
 def _placement_step(
     base_text: str, loc: locations.Location | None, changes: list[str]
 ) -> Step:
@@ -688,8 +716,10 @@ def _plan_placement(
         return
     owner = ctx.owner(text) if text else None
     if text and (owner is None or owner[0].archived):
-        if not s.get("archived"):  # an archived spool keeps whatever free text Spoolman has
+        if not s.get("archived"):
             plan.add(_unknown_location(s, text))
+        elif slot_of_location(base.location):
+            plan.add(*_archived_left_slot(s, base))  # an archived spool keeps whatever free text it has
         return
     loc, how = owner if owner is not None else (None, "")
     clash = _slot_clash(ctx, s, slot_of_location("" if loc is None else loc.path))
@@ -866,12 +896,18 @@ def _gone(
     conn: sqlite3.Connection, listed: set[int], seen: Mapping[int, Seen]
 ) -> tuple[list[int], int]:
     """(ids PrintOps knows from its bookmark or ledger that Spoolman no longer lists, how many it knows)."""
+    known = _known(conn, seen)
+    return sorted(known - listed), len(known)
+
+
+def _known(conn: sqlite3.Connection, seen: Mapping[int, Seen]) -> set[int]:
+    """Every spool id PrintOps knows from its bookmarks or its ledger and has not recorded as deleted."""
     known = {i for i, m in seen.items() if m.state == PRESENT}
     known |= {
         int(r["spool_id"]) for r in conn.execute("SELECT DISTINCT spool_id FROM ledger")
     }
     known -= {i for i, m in seen.items() if m.state == DELETED}
-    return sorted(known - listed), len(known)
+    return known
 
 
 def _confirmed_deleted(sm: Spoolman, sid: int, m: Seen | None) -> Drift | None:
@@ -1101,10 +1137,15 @@ class Confirmed:
     """What `confirm_deleted` did: the ids recorded as deleted and the ones Spoolman still answers for."""
 
     confirmed: list[int]
-    still_listed: list[int]
+    still_present: list[int]  # missing from the listing but Spoolman still answers for them
+    may_be_other_spools: list[int]  # known ids Spoolman STILL lists: after a wipe they can be new spools
 
     def to_dict(self) -> dict[str, Any]:
-        return {"confirmed": self.confirmed, "still_listed": self.still_listed}
+        return {
+            "confirmed": self.confirmed,
+            "still_present": self.still_present,
+            "may_be_other_spools": self.may_be_other_spools,
+        }
 
 
 def confirm_deleted(conn: sqlite3.Connection, sm: Spoolman) -> Confirmed:
@@ -1112,11 +1153,14 @@ def confirm_deleted(conn: sqlite3.Connection, sm: Spoolman) -> Confirmed:
     not list as deleted — each only after Spoolman answers 404 for it. Callers hold PASS_LOCK."""
     pool = sm.find("spool", {"allow_archived": "true"})
     seen = load_all(conn)
-    gone, _ = _gone(conn, {int(s["id"]) for s in pool}, seen)
-    done = Confirmed([], [])
+    listed = {int(s["id"]) for s in pool}
+    gone, _ = _gone(conn, listed, seen)
+    # a wiped and re-entered Spoolman numbers its new spools from 1 again: the ids it lists that PrintOps
+    # also knows are exactly the ones that may now be different spools; the owner has to check them
+    done = Confirmed([], [], sorted(_known(conn, seen) & listed))
     for sid in gone:
         if _confirmed_deleted(sm, sid, seen.get(sid)) is None:
-            done.still_listed.append(sid)
+            done.still_present.append(sid)
             continue
         _heal_deleted(conn, sid)
         done.confirmed.append(sid)

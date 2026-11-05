@@ -297,7 +297,7 @@ EXTRA_FIELDS: tuple[ExtraField, ...] = (
 # Extra fields PrintOps used to register and no longer wants: each has a native Spoolman twin
 # (docs/printops/native-fields.md). `3d printops fields migrate-native` moves the values over and
 # only then deletes the definition (Spoolman destroys every stored value with it); health reports
-# a still-present definition as degraded.
+# a still-present definition as a warning (`legacy_fields`; the API status stays ok).
 LEGACY_EXTRA_FIELDS: tuple[tuple[Entity, str], ...] = (
     ("vendor", "spool_tare_g"),  # -> vendor.empty_spool_weight
     ("spool", "printops_slot"),  # -> spool.location = "slot:<printer>/<head>"

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from errors import UsageError
 from printops.cli import SubAction
 from printops.cli._common import api_errors, client, parse
 
@@ -28,9 +29,13 @@ Options:
                  after `spoolman_empty` (most known spools missing from Spoolman at once: a wiped
                  Spoolman or a wrong SPOOLMAN_URL; the pass heals NOTHING while it holds): you checked,
                  they are really gone. Records every spool Spoolman answers 404 for as deleted (event,
-                 ledger note, slot freed), after which the pass works again. Needs the `write` scope
+                 ledger note, slot freed), after which the pass works again; it also lists the known ids
+                 Spoolman STILL lists ("may now belong to different spools": a wiped Spoolman numbers new
+                 spools from 1 again, check them). Alone: not with --spool or --heal (exit 2).
+                 Needs the `write` scope
   --json         the API's JSON answer ({ok, drift, healable, unhealable, drifts[]}; with --heal
-                 {ok, before, healed, failed, after})
+                 {ok, before, healed, failed, after}; with --confirm-deleted {confirmed, still_present,
+                 may_be_other_spools, after, ok})
   --api URL      3d-api base URL (default: $PRINTOPS_API, else ~/.config/3d-cli/printops.yaml)
   --token TOKEN  bearer token (default: $PRINTOPS_TOKEN, else the same file)
 
@@ -74,10 +79,29 @@ def fmt_heal(rep: dict[str, Any]) -> str:
 
 def fmt_confirmed(rep: dict[str, Any]) -> str:
     lines = [f"recorded {len(rep['confirmed'])} spool(s) as deleted: " + (", ".join(f"#{i}" for i in rep["confirmed"]) or "-")]
-    if rep["still_listed"]:
-        lines.append("still answered by Spoolman, left alone: " + ", ".join(f"#{i}" for i in rep["still_listed"]))
+    if rep["still_present"]:
+        lines.append("still answered by Spoolman, left alone: " + ", ".join(f"#{i}" for i in rep["still_present"]))
+    if rep["may_be_other_spools"]:
+        lines.append(
+            "ids that may now belong to different spools: check them in Spoolman: "
+            + ", ".join(f"#{i}" for i in rep["may_be_other_spools"])
+        )
     lines.append(fmt_report(rep["after"]))
     return "\n".join(lines)
+
+
+def _refuse_combined_confirm(p: Any, sub: str) -> None:
+    """`--confirm-deleted` is a bulk decision about every vanished spool: never with a narrower option."""
+    if "--confirm-deleted" not in p.flags:
+        return
+    clash = [o for o in ("--spool", "--heal") if o in p.opts or o in p.flags]
+    if clash:
+        raise UsageError(
+            f"--confirm-deleted cannot be combined with {' or '.join(clash)}: it records every spool "
+            "Spoolman answers 404 for, not one spool, and it heals nothing",
+            command=f"printops {sub}",
+            remediation=["Run `3d printops spool drift --confirm-deleted` alone, then `--heal`."],
+        )
 
 
 def run(argv: list[str]) -> int:
@@ -89,6 +113,7 @@ def run(argv: list[str]) -> int:
         argv, sub, values={"--api", "--token", "--spool"}, flags={"--json", "--heal", "--confirm-deleted"}
     )
     spool = p.int_opt("--spool", sub)
+    _refuse_combined_confirm(p, sub)
     api = client(p, sub)
     with api_errors(sub):
         if "--confirm-deleted" in p.flags:

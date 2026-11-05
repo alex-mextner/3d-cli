@@ -50,7 +50,9 @@ Ticket: [#704](https://github.com/alex-mextner/3d-cli/issues/704). Code: `lib/pr
     when most of the known spools vanish at once (`spoolman_empty`: a wiped Spoolman or a wrong `SPOOLMAN_URL`);
     while that holds the pass heals **no** spool (its ids may belong to another inventory) and the way out is
     explicit: `3d printops spool drift --confirm-deleted` (`POST /v1/spool-sync/confirm-deleted`) records every
-    spool Spoolman answers 404 for as deleted;
+    spool Spoolman answers 404 for as deleted, and names the known ids Spoolman still lists as "may now belong to
+    different spools: check them" (a wiped and re-entered Spoolman numbers its new spools from 1 again, so a
+    surviving id can be a different spool). It cannot be combined with `--spool` or `--heal`;
     the bookmark never moves past a placement nobody healed (`location_unknown`, `slot_conflict`): the move,
     the unload and the load are booked in full once the cause is fixed; an archived spool's free-text location is
     not drift;

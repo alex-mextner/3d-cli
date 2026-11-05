@@ -258,7 +258,8 @@ def test_confirm_deleted_needs_write_and_lifts_the_wiped_spoolman_guard(shop: Sh
     done = http.post("/v1/spool-sync/confirm-deleted")
     assert done.status_code == 200, done.text
     body = done.json()
-    assert sorted(body["confirmed"]) == ids[:4] and body["still_listed"] == []
+    assert sorted(body["confirmed"]) == ids[:4] and body["still_present"] == []
+    assert body["may_be_other_spools"] == [ids[4]]  # still listed: after a wipe it may be a new spool
     assert "spoolman_empty" not in [d["kind"] for d in body["after"]["drifts"]]
     healed = http.post("/v1/spool-sync/heal").json()
     assert [d["kind"] for d in healed["healed"]] == ["remaining"] and healed["ok"] is True
