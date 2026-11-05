@@ -24,7 +24,7 @@ from printops import printer_tasks as pt
 from printops.calibration_catalog import load_catalog
 from printops.client import ApiClient, ApiError
 from printops.fleet import load_fleet
-from printops.spoolman import Spoolman, SpoolmanError, encode_extra, ensure_extra_fields
+from printops.spoolman import Spoolman, SpoolmanError, ensure_extra_fields
 
 RULES = """\
 rules:
@@ -257,9 +257,9 @@ def spool(
             },
         )["id"]
     )
-    extra = {"printops_slot": encode_extra(slot)} if slot else {}
+    loc = {"location": f"slot:{slot}"} if slot else {}
     return int(
-        sm.create("spool", {"filament_id": fid, "lot_nr": lot, "extra": extra})["id"]
+        sm.create("spool", {"filament_id": fid, "lot_nr": lot, **loc})["id"]
     )
 
 
@@ -562,7 +562,7 @@ def test_another_spool_rewrites_the_heads_task_and_an_unknown_spool_leaves_it(
     monkeypatch.setattr(fake_spoolman, "find", down)
     assert pt.sync(conn, src, "k1se").changed == 0  # Spoolman down: nothing closes
     monkeypatch.undo()
-    fake_spoolman.update("spool", a, {"extra": {"printops_slot": encode_extra("")}})
+    fake_spoolman.update("spool", a, {"location": ""})
     assert (
         pt.sync(conn, src, "k1se").changed == 0
     )  # nothing bound: unknown, the entries stay as they were
@@ -624,9 +624,7 @@ def test_a_spool_back_whose_kinds_were_dismissed_dismisses_the_other_spools_task
     fake_spoolman: FakeSpoolman,
 ) -> None:
     def load(sid: int, slot: str) -> None:
-        fake_spoolman.update(
-            "spool", sid, {"extra": {"printops_slot": encode_extra(slot)}}
-        )
+        fake_spoolman.update("spool", sid, {"location": f"slot:{slot}"})
 
     a = spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1")
     record(ctx, "flow_ratio", a)
@@ -660,7 +658,7 @@ def test_a_new_lot_dismissal_sticks_after_newer_records_on_another_lot(
         record(ctx, kind, a1)
     pt.sync(conn, src, "k1se")
     assert calib_open(conn, "k1se") == []
-    fake_spoolman.update("spool", a1, {"extra": {"printops_slot": encode_extra("")}})
+    fake_spoolman.update("spool", a1, {"location": ""})
     spool(ctx.spoolman, "Hyper PLA", slot="k1se/T1", lot="A2")
     pt.sync(conn, src, "k1se")
     [t] = calib_open(conn, "k1se")

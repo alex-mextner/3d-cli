@@ -164,7 +164,7 @@ Target package: `lib/geometry/`, with subpackages only when a real boundary appe
   (`Adapter.set_active_spool`) and `unload` clears it (`release_active_spool`).
   Slot reconciliation (#161): `slots.py` (read-only per-adapter slot readers: U1
   `print_task_config` + `filament_detect`, K1 SE ws runout switch), `color.py` (hex → CIELAB,
-  linear-light RGB, CIEDE2000; also the preflight colour gate), `reconcile.py` (Spoolman `printops_slot` bindings vs live slots, plus failed head
+  linear-light RGB, CIEDE2000; also the preflight colour gate), `reconcile.py` (Spoolman `slot:` location bindings vs live slots, plus failed head
   writes from the event log → `anomaly` rows + `slot.mismatch` / `anomaly.*` events), `api/routes_reconcile.py` (`/v1/printers`,
   `/v1/anomalies`, background poller via router lifespan).
   Incidents (#165): `incidents.py` (structured incidents, lifecycle, rates per kg / print-hour),

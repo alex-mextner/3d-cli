@@ -9,7 +9,7 @@ from pathlib import Path
 from printops_fixtures import LiveApi
 
 from printops import db, locations
-from printops.spoolman import decode_extra, encode_extra
+from printops.spoolman import decode_extra
 
 from .workflow_helper import run_cli
 
@@ -32,13 +32,13 @@ def _spool(live: LiveApi, material: str, opened_days_ago: float | None = None) -
             "weight": 1000,
         },
     )
-    extra = {}
+    first_used = None
     if opened_days_ago is not None:
         opened = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
             days=opened_days_ago
         )
-        extra["opened_at"] = encode_extra(opened.isoformat())
-    return int(sp.create("spool", {"filament_id": fil["id"], "extra": extra})["id"])
+        first_used = opened.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return int(sp.create("spool", {"filament_id": fil["id"], "first_used": first_used})["id"])
 
 
 def _add_dryer(live: LiveApi) -> None:

@@ -16,6 +16,7 @@ INVARIANTS:
   - `Db` is a fresh connection per request (closed afterwards); slices wrap multi-statement
     writes in `printops.db.transaction(conn)`.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -48,14 +49,22 @@ def authenticate(state: ApiState, header: str | None, *scopes: str) -> TokenReco
     """The token record for an Authorization header carrying any of `scopes`, or HTTPException 401/403."""
     token = bearer_token(header)
     if token is None:
-        raise HTTPException(401, "missing bearer token (Authorization: Bearer po_…)",
-                            headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(
+            401,
+            "missing bearer token (Authorization: Bearer po_…)",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     record = state.tokens.verify(token)
     if record is None:
-        raise HTTPException(401, "unknown or revoked token", headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(
+            401, "unknown or revoked token", headers={"WWW-Authenticate": "Bearer"}
+        )
     if not set(scopes) & set(record.scopes):
         want = " or ".join(repr(s) for s in scopes)
-        raise HTTPException(403, f"token {record.name!r} lacks scope {want} (has: {', '.join(record.scopes)})")
+        raise HTTPException(
+            403,
+            f"token {record.name!r} lacks scope {want} (has: {', '.join(record.scopes)})",
+        )
     return record
 
 
@@ -63,10 +72,14 @@ def require(*scopes: str) -> Callable[[Request], TokenRecord]:
     """Dependency factory: the caller's token must carry at least one of `scopes`."""
     unknown = [s for s in scopes if s not in SCOPES]
     if not scopes or unknown:
-        raise ValueError(f"unknown scope(s) {unknown or scopes!r}; accepted: {', '.join(SCOPES)}")
+        raise ValueError(
+            f"unknown scope(s) {unknown or scopes!r}; accepted: {', '.join(SCOPES)}"
+        )
 
     def dependency(request: Request) -> TokenRecord:
-        return authenticate(get_state(request), request.headers.get("authorization"), *scopes)
+        return authenticate(
+            get_state(request), request.headers.get("authorization"), *scopes
+        )
 
     return dependency
 
@@ -79,8 +92,12 @@ def get_db(request: Request) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def get_spoolman(request: Request) -> Spoolman:
-    sp = get_state(request).spoolman
+def get_spoolman(
+    request: Request, conn: Annotated[sqlite3.Connection, Depends(get_db)]
+) -> Spoolman:
+    """Spoolman for this request: the write path of 3d-api (`SyncedSpoolman`), bound to the
+    request's DB connection so the bookmark moves in the same transaction as the PrintOps change."""
+    sp = get_state(request).synced(conn)
     if sp is None:
         raise HTTPException(503, "Spoolman is not configured (set SPOOLMAN_URL)")
     return sp

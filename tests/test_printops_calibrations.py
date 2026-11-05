@@ -23,7 +23,7 @@ from printops.calibration_policy import parse as parse_policy
 from printops.client import ApiClient, ApiError
 from printops.fleet import load_fleet
 from printops.policy import PolicyError
-from printops.spoolman import Spoolman, encode_extra, ensure_extra_fields
+from printops.spoolman import Spoolman, ensure_extra_fields
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -55,13 +55,13 @@ def spool(sm: Spoolman | None, vendor: str, material: str, name: str, *, lot: st
     fid = fils[0]["id"] if fils else sm.create("filament", {
         "name": name, "vendor_id": vid, "material": material, "density": 1.24, "diameter": 1.75,
         "weight": 1000})["id"]
-    extra = {"printops_slot": encode_extra(slot)} if slot else {}
-    return int(sm.create("spool", {"filament_id": fid, "lot_nr": lot, "extra": extra})["id"])
+    loc = {"location": f"slot:{slot}"} if slot else {}
+    return int(sm.create("spool", {"filament_id": fid, "lot_nr": lot, **loc})["id"])
 
 
 def unbind(sm: Spoolman | None, spool_id: int) -> None:
     assert sm is not None
-    sm.update("spool", spool_id, {"extra": {"printops_slot": encode_extra("")}})
+    sm.update("spool", spool_id, {"location": ""})
 
 
 def by_kind(rs: cal.RequirementSet | cal.GateResult, head: str | None = "T1") -> dict[str, cal.Requirement]:

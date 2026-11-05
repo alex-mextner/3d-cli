@@ -19,6 +19,7 @@ the segment `contents` is reserved by the grammar so the routes never clash. Pri
 follow the fleet file automatically: the first write request after the file changed (a deploy)
 re-syncs them. Reads never sync — a read token must not create or archive locations.
 """
+
 from __future__ import annotations
 
 import logging
@@ -48,8 +49,11 @@ def _ensure_fleet(request: Request, conn: Db, who: Writer) -> sqlite3.Connection
     from printops.fleet import FleetError
 
     try:
-        report = locs.ensure_fleet_slots(conn, get_state(request).spoolman)
-    except (FleetError, locs.LocationError) as e:  # a broken fleet file must not take the tree down
+        report = locs.ensure_fleet_slots(conn, get_state(request).synced(conn))
+    except (
+        FleetError,
+        locs.LocationError,
+    ) as e:  # a broken fleet file must not take the tree down
         log.error("fleet slot sync failed: %s", getattr(e, "message", e))
         return conn
     if report is not None and (report.changed or report.kept):
@@ -60,7 +64,9 @@ def _ensure_fleet(request: Request, conn: Db, who: Writer) -> sqlite3.Connection
 Conn = Annotated[sqlite3.Connection, Depends(_ensure_fleet)]
 
 
-def _http(e: locs.LocationNotFound | locs.LocationError | SpoolmanError) -> HTTPException:
+def _http(
+    e: locs.LocationNotFound | locs.LocationError | SpoolmanError,
+) -> HTTPException:
     if isinstance(e, locs.LocationNotFound):
         return HTTPException(404, f"no location {e.ref!r}")
     if isinstance(e, locs.LocationError):
@@ -76,7 +82,9 @@ def _get(conn: sqlite3.Connection, ref: str) -> locs.Location:
 
 
 @router.get("/v1/locations")
-def list_locations(conn: Db, who: Reader, flat: bool = False, archived: bool = False) -> dict[str, Any]:
+def list_locations(
+    conn: Db, who: Reader, flat: bool = False, archived: bool = False
+) -> dict[str, Any]:
     rows = locs.all_locations(conn, include_archived=archived)
     if flat:
         return {"locations": [r.to_dict() for r in rows]}
@@ -84,7 +92,9 @@ def list_locations(conn: Db, who: Reader, flat: bool = False, archived: bool = F
 
 
 @router.get("/v1/locations/resolve")
-def resolve(conn: Db, who: Reader, q: Annotated[str, Query(min_length=1, max_length=200)]) -> dict[str, Any]:
+def resolve(
+    conn: Db, who: Reader, q: Annotated[str, Query(min_length=1, max_length=200)]
+) -> dict[str, Any]:
     try:
         return locs.resolve(conn, q).to_dict()
     except locs.LocationNotFound as e:
@@ -92,20 +102,32 @@ def resolve(conn: Db, who: Reader, q: Annotated[str, Query(min_length=1, max_len
 
 
 @router.post("/v1/locations", status_code=201)
-def create(conn: Conn, who: Writer, body: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+def create(
+    conn: Conn, who: Writer, body: Annotated[dict[str, Any], Body()]
+) -> dict[str, Any]:
     allowed = {"path", "kind", "capacity", "humidity_sensor_entity", "tag_uid", "note"}
     extra = sorted(set(body) - allowed)
     if extra:
-        raise HTTPException(422, f"unknown field(s) {', '.join(extra)}; accepted: {', '.join(sorted(allowed))}")
+        raise HTTPException(
+            422,
+            f"unknown field(s) {', '.join(extra)}; accepted: {', '.join(sorted(allowed))}",
+        )
     if not isinstance(body.get("path"), str) or not isinstance(body.get("kind"), str):
         raise HTTPException(422, "path and kind are required strings")
     note = body.get("note")
     if note is not None and not isinstance(note, str):
         raise HTTPException(422, "note must be a string")
     try:
-        loc = locs.add(conn, body["path"], body["kind"], actor=who.name, capacity=body.get("capacity"),
-                       humidity_sensor_entity=body.get("humidity_sensor_entity"), tag_uid=body.get("tag_uid"),
-                       note=note)
+        loc = locs.add(
+            conn,
+            body["path"],
+            body["kind"],
+            actor=who.name,
+            capacity=body.get("capacity"),
+            humidity_sensor_entity=body.get("humidity_sensor_entity"),
+            tag_uid=body.get("tag_uid"),
+            note=note,
+        )
     except locs.LocationError as e:
         raise _http(e) from e
     return loc.to_dict()
@@ -116,13 +138,17 @@ def sync_fleet(request: Request, conn: Db, who: Writer) -> dict[str, Any]:
     from printops.fleet import FleetError
 
     try:
-        report = locs.ensure_fleet_slots(conn, get_state(request).spoolman, actor=who.name, force=True)
+        report = locs.ensure_fleet_slots(
+            conn, get_state(request).synced(conn), actor=who.name, force=True
+        )
     except FleetError as e:
         raise HTTPException(422, f"{e}: {'; '.join(e.remediation)}") from e
     except locs.LocationError as e:
         raise _http(e) from e
     if report is None:
-        raise HTTPException(409, "no fleet file (fleet/printers.yaml) in this 3d-api; nothing to sync")
+        raise HTTPException(
+            409, "no fleet file (fleet/printers.yaml) in this 3d-api; nothing to sync"
+        )
     return report.to_dict()
 
 
@@ -135,7 +161,9 @@ def resync(conn: Conn, who: Writer, sp: Sm) -> dict[str, Any]:
 
 
 @router.get("/v1/locations/{ref:path}/contents")
-def contents(conn: Db, who: Reader, sp: Sm, ref: str, recursive: bool = False) -> dict[str, Any]:
+def contents(
+    conn: Db, who: Reader, sp: Sm, ref: str, recursive: bool = False
+) -> dict[str, Any]:
     loc = _get(conn, ref)
     try:
         spools = locs.contents(conn, sp, loc, recursive=recursive)
@@ -147,15 +175,24 @@ def contents(conn: Db, who: Reader, sp: Sm, ref: str, recursive: bool = False) -
 @router.get("/v1/locations/{ref:path}")
 def show(conn: Db, who: Reader, ref: str) -> dict[str, Any]:
     loc = _get(conn, ref)
-    return {**loc.to_dict(),
-            "ancestors": [a.to_dict() for a in locs.ancestors(conn, loc)],
-            "children": [c.to_dict() for c in locs.children(conn, loc, include_archived=True)],
-            "humidity_sensor": locs.humidity_sensor(conn, loc)}
+    return {
+        **loc.to_dict(),
+        "ancestors": [a.to_dict() for a in locs.ancestors(conn, loc)],
+        "children": [
+            c.to_dict() for c in locs.children(conn, loc, include_archived=True)
+        ],
+        "humidity_sensor": locs.humidity_sensor(conn, loc),
+    }
 
 
 @router.patch("/v1/locations/{ref:path}")
-def patch(request: Request, conn: Conn, who: Writer, ref: str,
-          body: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+def patch(
+    request: Request,
+    conn: Conn,
+    who: Writer,
+    ref: str,
+    body: Annotated[dict[str, Any], Body()],
+) -> dict[str, Any]:
     loc = _get(conn, ref)
     changes = dict(body)
     new_path = changes.pop("path", None)
@@ -163,15 +200,22 @@ def patch(request: Request, conn: Conn, who: Writer, ref: str,
         raise HTTPException(422, "path must be a string")
     if new_path is not None and changes:
         # two transactions (update, then move + Spoolman re-sync) could half-apply; keep them apart
-        raise HTTPException(422, "move (path) and attribute changes go in separate PATCH requests")
+        raise HTTPException(
+            422, "move (path) and attribute changes go in separate PATCH requests"
+        )
     result: dict[str, Any] = {"renamed": [], "spoolman": {"updated": [], "failed": []}}
     try:
         if changes:
             loc = locs.update(conn, loc, changes, actor=who.name)
         if new_path is not None:
-            moved = locs.move(conn, get_spoolman(request), loc, new_path, actor=who.name)
+            moved = locs.move(
+                conn, get_state(request).synced(conn), loc, new_path, actor=who.name
+            )
             loc = moved.location
-            result.update(renamed=[list(r) for r in moved.renamed], spoolman=moved.spoolman.to_dict())
+            result.update(
+                renamed=[list(r) for r in moved.renamed],
+                spoolman=moved.spoolman.to_dict(),
+            )
     except (locs.LocationError, SpoolmanError) as e:
         raise _http(e) from e
     # The move is committed even if some Spoolman writes failed: they are listed under
@@ -183,6 +227,8 @@ def patch(request: Request, conn: Conn, who: Writer, ref: str,
 def delete(request: Request, conn: Conn, who: Writer, ref: str) -> dict[str, Any]:
     loc = _get(conn, ref)
     try:
-        return locs.archive(conn, get_state(request).spoolman, loc, actor=who.name).to_dict()
+        return locs.archive(
+            conn, get_state(request).synced(conn), loc, actor=who.name
+        ).to_dict()
     except (locs.LocationError, SpoolmanError) as e:
         raise _http(e) from e

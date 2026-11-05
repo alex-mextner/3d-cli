@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # typing-only: printer_ops stays a lazy import inside the hel
 
 USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y0:Y1|NAME] [--source-3mf FILE.3mf]
                    [--visible [OBJ:]SPEC]... [--bridge-max MM] [--printops-api URL] [--offline]
-                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration --reason TEXT] [--json] [--secs S]
+                   [--printops-snapshot FILE] [--accept preset_match|mix_calibration|spool_in_sync --reason TEXT] [--json] [--secs S]
                    [--no-bed-move] [--fix]
   Read-only checks before a print (the one write is opt-in: --fix). `3d printer start` runs the same checks and refuses on FAIL.
   Every G-code gate runs; one whose input is missing is SKIP and says what to pass.
@@ -94,6 +94,10 @@ USAGE = """3d print-preflight FILE.gcode [--printer NAME] [--axis-limits X0:X1,Y
                          colour is UNVERIFIED when the slice recorded "no filament colors found in
                          projects" (an STL slice: the footer colour is the profile default)
   slot_binding_known     every used slot has a spool in the ledger (WARN: usage not booked)
+  spool_in_sync          Spoolman and PrintOps agree about the loaded spool (weight, slot, location):
+                         a typed weight, a clash or an unknown location FAILs, bookkeeping that is
+                         only late (usage just booked, a spool not processed yet) WARNs; fix with
+                         `3d printops spool drift --heal`. Override: --accept spool_in_sync --reason
   filament_sufficient    `; filament used [g]` + purge + margin vs the spool's remaining
                          interval: FAIL above it, WARN "weigh" inside it
   drying_due             the spool's drying state: wet FAIL, due WARN
@@ -127,10 +131,11 @@ Options:
                           used) and the PrintOps state comes from the snapshot file; not with --printops-api
   --printops-snapshot F   snapshot for --offline (default: $PRINTOPS_SNAPSHOT, else
                           ~/.cache/3d-cli/printops-snapshot.json; `3d printops gates snapshot`)
-  --accept CHECK          turn the FAIL of preset_match (printing with other presets on purpose) or of
+  --accept CHECK          turn the FAIL of preset_match (printing with other presets on purpose),
                           mix_calibration (a measured mix too far from the part's colour; the
-                          acceptance is also logged in 3d-api, needs a write token) into a WARN that
-                          carries --reason; only those two; needs --reason TEXT
+                          acceptance is also logged in 3d-api, needs a write token) or spool_in_sync
+                          (Spoolman and PrintOps disagree about the loaded spool, and you know why)
+                          into a WARN that carries --reason; only those three; needs --reason TEXT
   --reason TEXT           why the accepted mismatch is printed
   --no-bed-move           the bed line judges at the current Z: the printer's bed is not moved
   --fix                   add the thumbnails the G-code lacks, in place (header only: the toolpath is
