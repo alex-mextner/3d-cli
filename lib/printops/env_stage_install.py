@@ -10,7 +10,7 @@ neither imports the other.
 
 from __future__ import annotations
 
-import dataclasses
+import shlex
 import socket
 import subprocess
 from collections.abc import Callable
@@ -78,12 +78,49 @@ def _url(addr: str, port: int) -> str:
     return f"http://[{addr}]:{port}" if ":" in addr else f"http://{addr}:{port}"
 
 
-def compose_only(cfg: deploy.DeployConfig, host_dir: str) -> list[deploy.Step]:
-    """The deploy plan with `host_dir` as the backup disk, minus the rsync step: just bind + recreate."""
+def _bind_disk_script(src: str, host_dir: str) -> str:
+    """Recreate ONLY the 3d-api container with `host_dir` as /backup, every other value read from the running stack
+    (`docker inspect`/`docker port`): a stage never rebuilds the deploy from defaults, so Spoolman is not touched and
+    a stack installed with another directory, ports, bind address, time zone or CORS list keeps them. Refuses when
+    the stack is not there. The chosen disk is saved next to the data dir so a later plain deploy keeps it."""
+    q = shlex.quote
+    api, spoolman = (
+        f"{deploy.CONTAINER_PREFIX}-api",
+        f"{deploy.CONTAINER_PREFIX}-spoolman",
+    )
+    env_of = "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}'"
+    return (
+        "set -e; "
+        f"api={api}; sp={spoolman}; "
+        'for c in "$api" "$sp"; do docker inspect "$c" >/dev/null 2>&1 || '
+        '{ echo "container $c is not running here: install Spoolman first (3d init --env --spoolman ...)" >&2; exit 1; }; done; '
+        "src_of() { docker inspect -f '{{range .Mounts}}{{if eq .Destination \"'\"$2\"'\"}}{{.Source}}{{end}}{{end}}' \"$1\"; }; "
+        'spdata="$(src_of "$api" /spoolman-data)"; gcodes="$(src_of "$api" /gcodes)"; '
+        '[ -n "$spdata" ] && [ -n "$gcodes" ] || { echo "cannot read the data directories of $api" >&2; exit 1; }; '
+        'data="$(dirname "$spdata")"; '
+        'user="$(docker inspect -f \'{{.Config.User}}\' "$api")"; '
+        f'tz="$({env_of} "$api" | sed -n "s/^TZ=//p")"; '
+        f'cors="$({env_of} "$sp" | sed -n "s/^SPOOLMAN_CORS_ORIGIN=//p")"; '
+        'apiaddr="$(docker port "$api" 8765/tcp | head -n 1)"; spaddr="$(docker port "$sp" 8000/tcp | head -n 1)"; '
+        '[ -n "$apiaddr" ] && [ -n "$spaddr" ] || { echo "cannot read the published ports of the stack" >&2; exit 1; }; '
+        f'printf %s {q(host_dir)} > "$(dirname "$data")/{deploy.BACKUP_BIND_FILE}"; '
+        f'cd {q(src)} && PRINTOPS_DATA_DIR="$data" PRINTOPS_GCODE_HOST_DIR="$gcodes" PRINTOPS_BACKUP_DIR={q(host_dir)}'
+        ' PRINTOPS_UID="${user%%:*}" PRINTOPS_GID="${user##*:}" PRINTOPS_TZ="$tz" PRINTOPS_SPOOLMAN_CORS_ORIGIN="$cors"'
+        ' PRINTOPS_BIND_ADDR="${apiaddr%:*}" PRINTOPS_API_PORT="${apiaddr##*:}" PRINTOPS_SPOOLMAN_PORT="${spaddr##*:}"'
+        f" PRINTOPS_CONTAINER_PREFIX={deploy.CONTAINER_PREFIX}"
+        f" docker compose -p {deploy.PROJECT} -f {deploy.COMPOSE_FILE} up -d --no-deps api"
+    )
+
+
+def bind_disk_steps(cfg: deploy.DeployConfig, host_dir: str) -> list[deploy.Step]:
+    """The one step that binds `host_dir` into the running 3d-api container (no mkdirs, no sync, no build)."""
+    src = str(cfg.repo_root) if cfg.local else f"{cfg.remote_dir}/src"
     return [
-        s
-        for s in deploy.plan(dataclasses.replace(cfg, backup_dir=host_dir))
-        if not s.title.startswith("sync")
+        deploy.script_step(
+            cfg,
+            "recreate only 3d-api with the backup disk (values read from the running stack)",
+            _bind_disk_script(src, host_dir),
+        )
     ]
 
 
@@ -114,7 +151,7 @@ def stage_after_install(
         probe=shell(host, PROBE_TIMEOUT_S),
         data_dir=f"{cfg.remote_dir}/data",
         container=container,
-        redeploy=lambda host_dir: run_steps(compose_only(cfg, host_dir)),
+        redeploy=lambda host_dir: run_steps(bind_disk_steps(cfg, host_dir)),
         ask=ask,
         say=say,
         interactive=interactive,

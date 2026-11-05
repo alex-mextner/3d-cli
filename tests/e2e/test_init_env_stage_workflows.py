@@ -29,6 +29,19 @@ if a[:1] == ["--version"]:
     print("Docker version 27.0.0, build fake")
 elif a[:2] == ["compose", "version"]:
     print("2.29.0")
+elif a[:1] == ["inspect"]:
+    if os.environ.get("FAKE_STACK") == "down":
+        sys.exit(1)
+    fmt = a[2] if a[1] == "-f" else ""
+    if "Destination" in fmt:
+        dest = fmt.split('"')[1]
+        print({{"/spoolman-data": os.environ["FAKE_DATA"] + "/spoolman", "/gcodes": os.environ["FAKE_DATA"] + "/../gcodes"}}.get(dest, ""))
+    elif ".Config.User" in fmt:
+        print("1000:1000")
+    elif ".Config.Env" in fmt:
+        print("TZ=UTC")
+elif a[:1] == ["port"]:
+    print("127.0.0.1:" + ("8765" if a[1].endswith("api") else "7912"))
 elif a[:1] == ["compose"]:
     for key, value in sorted(os.environ.items()):
         if key.startswith("PRINTOPS_"):
@@ -101,6 +114,7 @@ def stack(tmp_path: Path) -> Iterator[Stack]:
             "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_LOG": str(tmp_path / "fake.log"),
             "FAKE_BACKUP_DIR": str(disk),
+            "FAKE_DATA": str(tmp_path / "xdg-data" / "3d-cli" / "printops" / "data"),
             "HA_TOKEN": TOKEN,
         }
     )
@@ -319,3 +333,25 @@ def test_stage_flag_mistakes_exit_2_naming_the_flag(
     )
     assert r.returncode == 2 and needle in r.stderr and "Traceback" not in r.stderr
     assert "compose -p" not in stack.log
+
+
+def test_stage_only_refuses_when_the_stack_is_not_running_and_changes_nothing(
+    stack: Stack,
+) -> None:
+    """Story: `--stage-only` on a machine whose containers are gone must not rebuild the stack from defaults."""
+    stack.env["FAKE_STACK"] = "down"
+    r = stack.init()
+    assert r.returncode == 1, r.stdout
+    assert "is not running here" in r.stdout + r.stderr and "NOT configured" in r.stdout
+    assert (
+        "compose -p" not in stack.log and not (stack.disk / ".3d-backup-disk").exists()
+    )
+
+
+def test_the_chosen_disk_is_remembered_next_to_the_data_dir(stack: Stack) -> None:
+    ok = stack.init()
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    saved = stack.tmp / "xdg-data" / "3d-cli" / "printops" / "backup-dir"
+    assert saved.read_text(encoding="utf-8") == str(
+        stack.disk
+    )  # a later plain `3d printops deploy` binds it again

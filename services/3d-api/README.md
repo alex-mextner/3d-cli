@@ -104,7 +104,10 @@ Both containers run as uid/gid 1000 (`ultra`), so the files stay owned by the ho
 Schedule: **Home Assistant** (`integrations/homeassistant/packages/printops_backup.yaml`, 04:00, retention 7 daily + 4 weekly + 6 monthly;
 one EDIT HERE block) calls `POST /v1/backup/run`; 3d-api runs `3d printops backup run` as a niced child process. There is no
 systemd timer or cron. Destination: the host dir `PRINTOPS_BACKUP_DIR` bound as `/backup`, which must carry the disk marker
-(`docker exec printops-api 3d printops backup target add default /backup --init-marker`). Full reference: `docs/commands/printops.md#backup`.
+(`docker exec printops-api 3d printops backup target add default /backup --init-marker`). The disk bound by `3d init --env` is
+remembered in `<--dir>/backup-dir`, so a later `3d printops deploy` keeps it; `/backup` is mounted `rslave`, so a disk mounted after the
+container started becomes visible. Over the API a run is never kept below `retention_floor:` in `backup.yaml` (default 7/4/6).
+`3d printops health` says `NOT CONFIGURED` when no backup disk is registered. Full reference: `docs/commands/printops.md#backup`.
 
 ```
 docker exec printops-api 3d printops backup run --target default      # by hand
@@ -112,8 +115,17 @@ docker exec printops-api 3d printops backup ls --target default
 docker exec printops-api 3d printops backup restore latest --target default --into /data/restore-test
 ```
 
-Restore into a live stack: stop it (`docker compose -p printops -f services/3d-api/compose.yaml down`), then
-`3d printops backup restore latest --target default --into <PRINTOPS_DATA_DIR> --layout data --yes`, then `up -d`.
+Restore into a live stack, from the HOST (the container is stopped, and `backup.yaml` names the container's `/backup`, which
+does not exist on the host, so name the disk itself with `--dest`):
+
+```
+docker compose -p printops -f services/3d-api/compose.yaml down
+3d printops backup restore latest --dest <host disk root> --subdir 3d-printops --into <PRINTOPS_DATA_DIR> --layout data --yes
+docker compose -p printops -f services/3d-api/compose.yaml up -d
+```
+
+Old files, with their `-wal`/`-shm`, become `*.pre-restore` (never overwritten: `.pre-restore.1`, ...). The set is copied to a private
+scratch dir and verified there before anything is written.
 
 ## Tokens
 

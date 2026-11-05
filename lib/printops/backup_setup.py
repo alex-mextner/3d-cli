@@ -178,8 +178,10 @@ DO, IN ORDER (ask the user before anything marked CONFIRM)
 4. Register the disk: `docker exec {ctx.container} 3d printops backup target add {TARGET} {CONTAINER_ROOT} --init-marker`
 5. Prove it: `docker exec {ctx.container} 3d printops backup selftest --target {TARGET}`. It must end with `selftest ok`.
 6. Tell the user the schedule lives in Home Assistant (integrations/homeassistant/packages/printops_backup.yaml,
-   04:00, 7 daily + 4 weekly + 6 monthly; edit the block marked EDIT HERE). If HA is not set up yet:
-   `3d init --env` offers to install that package.
+   04:00, 7 daily + 4 weekly + 6 monthly; edit the block marked EDIT HERE). That package is only installed when the
+   backup is configured in the SAME run of `3d init --env --stage-only --spoolman <local|ssh:USER@HOST> --backup
+   path:<dir>` (it offers the HA package afterwards; a plain `3d init --env` on a configured stack only says
+   "already configured"). Without that run, copy the package into HA's packages/ yourself.
 
 DONE WHEN: `selftest ok` printed, `3d printops backup ls --target {TARGET}` lists the set, and the user knows the disk
 path. Report the exact commands you ran. If anything contradicts this text, stop and ask."""

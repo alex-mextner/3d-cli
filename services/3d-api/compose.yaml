@@ -84,7 +84,13 @@ services:
       # the BACKUP DISK (host dir PRINTOPS_BACKUP_DIR). A run refuses a directory without the disk's marker file
       # `.3d-backup-disk` (3d printops backup target add default /backup --init-marker): an unmounted disk
       # never fills this host's root filesystem. Home Assistant schedules the runs (packages/printops_backup.yaml).
-      - ${PRINTOPS_BACKUP_DIR:-/home/ultra/homeassistant/printops-backup}:/backup
+      # rslave: a disk mounted AFTER the container started (fstab `nofail`, a slow USB disk) shows up inside it
+      # instead of leaving the empty mount-point directory behind ("marker missing" every night).
+      - type: bind
+        source: ${PRINTOPS_BACKUP_DIR:-/home/ultra/homeassistant/printops-backup}
+        target: /backup
+        bind:
+          propagation: rslave
       # sliced plates for the incident auto-context (read-only)
       - ${PRINTOPS_GCODE_HOST_DIR:-/home/ultra/printops/gcodes}:/gcodes:ro
     ports:
