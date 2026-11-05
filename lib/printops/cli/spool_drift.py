@@ -11,7 +11,7 @@ from typing import Any
 from printops.cli import SubAction
 from printops.cli._common import api_errors, client, parse
 
-USAGE = """3d printops spool drift [--spool ID] [--heal] [--json] [--api URL] [--token TOKEN]
+USAGE = """3d printops spool drift [--spool ID] [--heal | --confirm-deleted] [--json] [--api URL] [--token TOKEN]
   Check that Spoolman (the web UI, Moonraker's [spoolman]) and PrintOps (ledger, bindings, events)
   agree, spool by spool: remaining weight (ledger vs Spoolman, ± 0.5 g), new / deleted / archived
   spools, location and slot, derived fields. Spoolman holds the current value; a difference means
@@ -22,8 +22,13 @@ USAGE = """3d printops spool drift [--spool ID] [--heal] [--json] [--api URL] [-
 Options:
   --spool ID     only this spool
   --heal         apply what is healable: PrintOps catches up by appending ledger rows (a UI weighing
-                 becomes an anchor, Moonraker usage a delta), events and notes; the weight is never
+                 becomes a weighing anchor, a typed one a manual estimate, Moonraker usage a delta), events and notes; the weight is never
                  written back to Spoolman. Needs the `write` scope
+  --confirm-deleted
+                 after `spoolman_empty` (most known spools missing from Spoolman at once: a wiped
+                 Spoolman or a wrong SPOOLMAN_URL; the pass heals NOTHING while it holds): you checked,
+                 they are really gone. Records every spool Spoolman answers 404 for as deleted (event,
+                 ledger note, slot freed), after which the pass works again. Needs the `write` scope
   --json         the API's JSON answer ({ok, drift, healable, unhealable, drifts[]}; with --heal
                  {ok, before, healed, failed, after})
   --api URL      3d-api base URL (default: $PRINTOPS_API, else ~/.config/3d-cli/printops.yaml)
@@ -32,7 +37,8 @@ Options:
 Examples:
   3d printops spool drift
   3d printops spool drift --spool 7 --json
-  3d printops spool drift --heal"""
+  3d printops spool drift --heal
+  3d printops spool drift --confirm-deleted"""
 
 
 def fmt_drift(d: dict[str, Any]) -> str:
@@ -66,18 +72,30 @@ def fmt_heal(rep: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def fmt_confirmed(rep: dict[str, Any]) -> str:
+    lines = [f"recorded {len(rep['confirmed'])} spool(s) as deleted: " + (", ".join(f"#{i}" for i in rep["confirmed"]) or "-")]
+    if rep["still_listed"]:
+        lines.append("still answered by Spoolman, left alone: " + ", ".join(f"#{i}" for i in rep["still_listed"]))
+    lines.append(fmt_report(rep["after"]))
+    return "\n".join(lines)
+
+
 def run(argv: list[str]) -> int:
     if argv and argv[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0
     sub = "spool drift"
     p = parse(
-        argv, sub, values={"--api", "--token", "--spool"}, flags={"--json", "--heal"}
+        argv, sub, values={"--api", "--token", "--spool"}, flags={"--json", "--heal", "--confirm-deleted"}
     )
     spool = p.int_opt("--spool", sub)
     api = client(p, sub)
     with api_errors(sub):
-        if "--heal" in p.flags:
+        if "--confirm-deleted" in p.flags:
+            rep = api.post("/v1/spool-sync/confirm-deleted", {})
+            text = fmt_confirmed(rep)
+            rep["ok"] = rep["after"]["ok"]
+        elif "--heal" in p.flags:
             rep = api.post(
                 "/v1/spool-sync/heal", {"spool_id": spool} if spool is not None else {}
             )

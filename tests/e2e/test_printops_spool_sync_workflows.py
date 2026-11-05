@@ -180,6 +180,35 @@ def test_an_unhealable_drift_needs_a_person_until_the_location_exists(
     assert cli(tmp_path, shop, "printops", "spool", "drift").returncode == 0
 
 
+def test_a_wiped_spoolman_heals_nothing_until_the_owner_confirms_the_deletions(
+    tmp_path: Path, shop: LiveApi
+) -> None:
+    """Spoolman is replaced by an empty one (or SPOOLMAN_URL points elsewhere): `spool drift --heal`
+    refuses to touch the survivor and names `--confirm-deleted`; after the owner confirms, the lost
+    spools are recorded as deleted and the heal of the survivor works again."""
+    ids = [receive(shop) for _ in range(5)]
+    for sid in ids[:4]:
+        shop.spoolman.delete("spool", sid)
+    ui_edit(shop, ids[4], 412)
+
+    stuck = cli(tmp_path, shop, "printops", "spool", "drift", "--heal")
+    assert stuck.returncode == 1, stuck.stdout
+    assert "healed 0 difference(s)" in stuck.stdout and "[spoolman_empty]" in stuck.stdout
+    assert "--confirm-deleted" in stuck.stdout
+    assert shop.spoolman.get("spool", ids[4])["remaining_weight"] == 412
+
+    read_only = cli(tmp_path, shop, "printops", "spool", "drift", "--confirm-deleted", token="read")
+    assert read_only.returncode == 1 and "403" in read_only.stderr
+
+    confirmed = cli(tmp_path, shop, "printops", "spool", "drift", "--confirm-deleted")
+    assert "recorded 4 spool(s) as deleted: " + ", ".join(f"#{i}" for i in ids[:4]) in confirmed.stdout
+    assert "[spoolman_empty]" not in confirmed.stdout
+
+    healed = cli(tmp_path, shop, "printops", "spool", "drift", "--heal")
+    assert healed.returncode == 0, healed.stdout + healed.stderr
+    assert "healed 1 difference(s)" in healed.stdout and "in step" in healed.stdout
+
+
 def test_drift_heal_needs_the_write_scope_and_drift_the_read_scope(
     tmp_path: Path, shop: LiveApi
 ) -> None:
@@ -246,7 +275,7 @@ def test_every_option_in_the_drift_usage_exists(tmp_path: Path, shop: LiveApi) -
     options = re.findall(
         r"^  (--[a-z-]+)", spool_drift.USAGE.split("Options:")[1], re.M
     )
-    assert sorted(options) == ["--api", "--heal", "--json", "--spool", "--token"]
+    assert sorted(options) == ["--api", "--confirm-deleted", "--heal", "--json", "--spool", "--token"]
     values = {"--spool": "1", "--api": shop.url, "--token": shop.tokens["rw"]}
     for opt in options:
         argv = [

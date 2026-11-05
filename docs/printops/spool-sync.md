@@ -23,7 +23,10 @@ Ticket: [#704](https://github.com/alex-mextner/3d-cli/issues/704). Code: `lib/pr
    `slot:<printer>/<head>`), one spool per slot, no archived spool in a slot; every move/archive/delete is
    recorded; derived caches (`remaining_confidence_g`, a native tare) match what PrintOps knows.
 5. **Healing appends, it never overwrites Spoolman with an old copy.** A weight typed or measured in the UI
-   becomes a `weigh` **anchor** (± scale and tare, like `spool measure`); a drop of a spool loaded in a Moonraker
+   becomes an **anchor**: a `weigh` one (± scale and tare, like `spool measure`) when Spoolman's own `/measure`
+   or `/use` made it (they move `last_used`), a `manual` one (an estimate, ± 10 %, at least 20 g, like
+   `receive --remaining`) when it was typed into the edit form, seen for the first time, or the ledger moved
+   alone — a typed number is not a weighing, so it never satisfies the `spools/not-weighed` lint; a drop of a spool loaded in a Moonraker
    `[spoolman]` printer becomes a `moonraker_live` **delta**. The label is a best guess, the resulting mid is
    Spoolman's either way, so a wrong label can never leave the two apart. The weight is never written back.
 6. **One write path.** 3d-api hands every domain function a `SyncedSpoolman` (`ApiState.synced(conn)`,
@@ -42,6 +45,12 @@ Ticket: [#704](https://github.com/alex-mextner/3d-cli/issues/704). Code: `lib/pr
    `block`) FAILs a loaded spool that drifted and `filament_sufficient` goes UNVERIFIED instead of picking a number.
 10. **Guards against the dangerous case**: a spool is "deleted" only after a 404 for that very id, and never
     when most of the known spools vanish at once (`spoolman_empty`: a wiped Spoolman or a wrong `SPOOLMAN_URL`);
+    while that holds the pass heals **no** spool (its ids may belong to another inventory) and the way out is
+    explicit: `3d printops spool drift --confirm-deleted` (`POST /v1/spool-sync/confirm-deleted`) records every
+    spool Spoolman answers 404 for as deleted;
+    the bookmark never moves past a placement nobody healed (`location_unknown`, `slot_conflict`): the move,
+    the unload and the load are booked in full once the cause is fixed; an archived spool's free-text location is
+    not drift;
     a Spoolman whose `last_used` went backwards was restored from a backup (`spoolman_rolled_back`): nothing is
     healed on that spool until someone weighs it.
 
@@ -95,7 +104,7 @@ anomalies of scope `spools` := what is left that cannot self-heal
 | Drift kind | Cause | Heal |
 |---|---|---|
 | `remaining` | UI edit / `/measure` (anchor), Moonraker usage (delta), first sight, ledger moved alone | append anchor / delta; never write Spoolman |
-| `unknown_spool` / `spool_returned` | created in the UI / back after a restore | event + anchor from its weight (sealed → `receive`, used → `weigh`) |
+| `unknown_spool` / `spool_returned` | created in the UI / back after a restore | event + anchor from its weight (sealed → `receive`, used → `manual`) |
 | `spool_deleted` | deleted in the UI (404 confirmed) | ledger note, event, slot released |
 | `archived` | archived / un-archived in the UI | ledger note + event |
 | `location` | moved in the UI; former path left by a failed PrintOps move; archived spool still in a slot | `spool.moved` / `slot.loaded` / `slot.unloaded` events; text healed only for a former path; archived → out of the slot |
@@ -107,7 +116,7 @@ anomalies of scope `spools` := what is left that cannot self-heal
 * After restoring Spoolman **or** the PrintOps DB from a backup: `3d printops spool drift`, then `--heal`
   (a restored Spoolman is reported as `spoolman_rolled_back`; weigh the affected spools).
 * First pass on an existing system: every spool is seen for the first time; where the ledger and Spoolman already
-  disagree the ledger is anchored at Spoolman's weight (a `weigh` row noting "first sync"), the spool's history stays.
+  disagree the ledger is anchored at Spoolman's weight (a `manual` row noting "first sync"), the spool's history stays.
 * The print-queue's ledger-only booking for Moonraker printers (`docs/specs/2026-10-30-print-queue.md` §4.2) is
   compatible: the value comparison is what prevents counting a job twice, whichever side books first.
 * Not covered: Moonraker's active spool is not cleared when the UI moves a loaded spool

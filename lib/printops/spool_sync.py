@@ -52,7 +52,7 @@ import math
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from errors import ThreeDError
@@ -358,8 +358,34 @@ def _weight_cause(
     return "usage" if _is_usage(ctx, s, m, now, mid) else "edit"
 
 
+def _is_weighing(s: Mapping[str, Any], m: Seen | None, cause: str) -> bool:
+    """A weight change that Spoolman's own `/measure` or `/use` made moves `last_used`; a number typed
+    into the edit form (PATCH), a first sight, or a ledger that moved by itself does not: those are
+    estimates, not weighings."""
+    last_used = str(s["last_used"]) if s.get("last_used") else None
+    return cause == "edit" and m is not None and last_used != m.last_used
+
+
+def _anchor_kind(
+    h: Heal, s: Mapping[str, Any], cause: str, now: float, weighed: bool
+) -> tuple[str, float]:
+    """(ledger source, ±g) of the anchor a weight change becomes."""
+    if cause == "adopt" and not s.get("used_weight") and not s.get("first_used"):
+        return "receive", ledger.receive_sigma(now)  # sealed
+    if weighed:
+        return "weigh", _edit_sigma(h.conn, s)
+    return "manual", max(
+        spools.MANUAL_REMAINING_MIN_G, now * spools.MANUAL_REMAINING_FRACTION
+    )
+
+
 def _weight_step(
-    s: Mapping[str, Any], cause: str, before: float | None, now: float, note: str
+    s: Mapping[str, Any],
+    cause: str,
+    before: float | None,
+    now: float,
+    note: str,
+    weighed: bool,
 ) -> Step:
     sid = int(s["id"])
 
@@ -377,16 +403,7 @@ def _weight_step(
                 "ledger_id": row,
             }
         else:
-            sealed = (
-                cause == "adopt"
-                and not s.get("used_weight")
-                and not s.get("first_used")
-            )
-            source, sigma = (
-                ("receive", ledger.receive_sigma(now))
-                if sealed
-                else ("weigh", _edit_sigma(h.conn, s))
-            )
+            source, sigma = _anchor_kind(h, s, cause, now, weighed)
             row = ledger.anchor(h.conn, sid, now, source, sigma, actor=ACTOR, note=note)
             payload = {
                 "field": "remaining_weight",
@@ -438,7 +455,7 @@ def _plan_weight(
     action = (
         "book the usage in the ledger (no Spoolman write)"
         if cause == "usage"
-        else "anchor the ledger at Spoolman's weight (a weighing, ± scale and tare)"
+        else "anchor the ledger at Spoolman's weight (a weighing when Spoolman measured it, else an estimate)"
     )
     plan.add(
         Drift(
@@ -455,7 +472,12 @@ def _plan_weight(
             },
         ),
         _weight_step(
-            s, cause, before, now, f"{verb}: {have} → Spoolman {now:.1f} g (spool-sync)"
+            s,
+            cause,
+            before,
+            now,
+            f"{verb}: {have} → Spoolman {now:.1f} g (spool-sync)",
+            _is_weighing(s, m, cause),
         ),
     )
 
@@ -566,7 +588,7 @@ def _archived_in_slot(s: Mapping[str, Any], key: str) -> tuple[Drift, Step]:
 
 
 def _placement_step(
-    base_text: str, loc: locations.Location | None, changes: list[str], clash: bool
+    base_text: str, loc: locations.Location | None, changes: list[str]
 ) -> Step:
     def step(h: Heal) -> None:
         if "former_path" in changes and loc is not None:
@@ -594,11 +616,7 @@ def _placement_step(
                     "moved in Spoolman",
                     to=new_path or None,
                 )
-        if (
-            new_key
-            and not clash
-            and ("moved" in changes or "adopted_in_slot" in changes)
-        ):
+        if new_key and ("moved" in changes or "adopted_in_slot" in changes):
             _slot_event(h, "slot.loaded", new_key, "loaded in Spoolman")
 
     return step
@@ -665,17 +683,19 @@ def _plan_placement(
         return
     owner = ctx.owner(text) if text else None
     if text and (owner is None or owner[0].archived):
-        plan.add(_unknown_location(s, text))
+        if not s.get("archived"):  # an archived spool keeps whatever free text Spoolman has
+            plan.add(_unknown_location(s, text))
         return
     loc, how = owner if owner is not None else (None, "")
     clash = _slot_clash(ctx, s, slot_of_location("" if loc is None else loc.path))
     if clash is not None:
-        plan.add(clash)
+        plan.add(clash)  # nothing of the move is booked while two spools claim one slot
+        return
     changes = _placement_changes(how, adopt, text != base.location, key)
     if changes:
         plan.add(
             _placement_drift(s, base, loc, how, changes),
-            _placement_step(base.location, loc, changes, clash is not None),
+            _placement_step(base.location, loc, changes),
         )
 
 
@@ -881,14 +901,13 @@ def _vanished(
     most of them vanish at once (a wiped Spoolman or a wrong URL is a person's call)."""
     gone, known = _gone(conn, listed, seen)
     if len(gone) >= MISSING_MIN and len(gone) > MISSING_FRACTION * known:
-        if only is not None:
-            return []
         return [
             Drift(
                 None,
                 KIND_EMPTY,
                 f"{len(gone)} of the {known} spools PrintOps knows are missing from Spoolman at once: a wiped Spoolman or a wrong "
-                "SPOOLMAN_URL. Nothing is recorded as deleted until you check",
+                "SPOOLMAN_URL. Nothing is healed or recorded as deleted until you check "
+                "(`3d printops spool drift --confirm-deleted` records them once you did)",
                 False,
                 "",
                 {"missing": gone, "known": known},
@@ -927,6 +946,16 @@ def detect_spools(
 # -- healing -----------------------------------------------------------------------------------
 
 
+def _bookmark(s: Mapping[str, Any], m: Seen | None, plan: Plan) -> Seen:
+    """What PrintOps has processed of `s` after a heal: all of it, except a placement nobody could
+    heal (an unknown location, a slot clash). That one keeps the OLD location, so the move, the unload
+    of the slot it left and the load of the slot it enters are booked in full when the cause is fixed."""
+    seen = seen_of(s)
+    if any(d.kind in (KIND_LOCATION_UNKNOWN, KIND_SLOT_CONFLICT) for d in plan.drifts):
+        seen = replace(seen, location="" if m is None else m.location)
+    return seen
+
+
 def heal_spool(
     conn: sqlite3.Connection,
     sm: SyncedSpoolman,
@@ -937,7 +966,8 @@ def heal_spool(
     (the transaction, and so every row of this spool, is rolled back)."""
     with db.transaction(conn):
         s = sm.get("spool", spool_id)
-        plan = plan_spool(Context(conn, pool), s)
+        ctx = Context(conn, pool)
+        plan = plan_spool(ctx, s)
         healable = [d for d in plan.drifts if d.healable]
         if not healable or any(d.kind == KIND_ROLLED_BACK for d in plan.drifts):
             return []
@@ -948,7 +978,7 @@ def heal_spool(
         if sigma is not None:
             h.set_extra(CONFIDENCE_EXTRA, sigma)
         # the bookmark moves to what was READ; the write below then moves only the fields it sets
-        store(conn, seen_of(s))
+        store(conn, _bookmark(s, ctx.seen.get(spool_id), plan))
         if h.patch:
             sm.update("spool", spool_id, h.patch)
         return healable
@@ -1045,6 +1075,11 @@ def heal(
     """Heal every healable drift, then detect again: `after` is what is left. One spool's failure
     (Spoolman refused a write) is reported and does not stop the others. Callers hold PASS_LOCK."""
     before = detect(conn, sm, only=only)
+    if any(d.kind == KIND_EMPTY for d in before.drifts):
+        # a wiped Spoolman or a wrong URL: its spools share ids with the ones the ledger knows, so
+        # anchoring, booking or writing anything would mix two inventories
+        log.warning("spool-sync: %s; nothing is healed", KIND_EMPTY)
+        return HealReport(before, [], [], before)
     healed: list[Drift] = []
     failed: list[dict[str, Any]] = []
     for sid in sorted({d.spool_id for d in before.healable if d.spool_id is not None}):
@@ -1054,6 +1089,33 @@ def heal(
             log.warning("spool-sync: healing #%s failed: %s", sid, error)
             failed.append({"spool_id": sid, "error": error})
     return HealReport(before, healed, failed, detect(conn, sm, only=only))
+
+
+@dataclass
+class Confirmed:
+    """What `confirm_deleted` did: the ids recorded as deleted and the ones Spoolman still answers for."""
+
+    confirmed: list[int]
+    still_listed: list[int]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"confirmed": self.confirmed, "still_listed": self.still_listed}
+
+
+def confirm_deleted(conn: sqlite3.Connection, sm: Spoolman) -> Confirmed:
+    """The owner's decision after `spoolman_empty`: record every spool PrintOps knows and Spoolman does
+    not list as deleted — each only after Spoolman answers 404 for it. Callers hold PASS_LOCK."""
+    pool = sm.find("spool", {"allow_archived": "true"})
+    seen = load_all(conn)
+    gone, _ = _gone(conn, {int(s["id"]) for s in pool}, seen)
+    done = Confirmed([], [])
+    for sid in gone:
+        if _confirmed_deleted(sm, sid, seen.get(sid)) is None:
+            done.still_listed.append(sid)
+            continue
+        _heal_deleted(conn, sid)
+        done.confirmed.append(sid)
+    return done
 
 
 # -- the scheduled pass: heal, then anomalies for what is left --------------------------------------

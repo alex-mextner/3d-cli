@@ -300,6 +300,9 @@ mistaken for somebody else's. The whole model, and what was wrong before, is in
   `3d printops spool drift --json | jq '.drifts[].kind'`
 - `drift --heal` — the same pass the schedule runs, now: exit 0 when nothing is left, 1 when something needs a
   person (listed). `3d printops spool drift --heal`
+- `drift --confirm-deleted` — the way out of `spoolman_empty` (most known spools missing at once, so the pass heals
+  nothing): after you checked that they are really gone, records every spool Spoolman answers 404 for as deleted.
+  Needs `write`. `3d printops spool drift --confirm-deleted`
 - `3d printops health` shows the drift count, the last pass and stuck anomalies, and exits 1 on drift;
   `3d print-preflight` grades a drifted loaded spool with the policy check `spool_in_sync`.
 
@@ -327,6 +330,7 @@ Kinds: `remaining`, `unknown_spool`, `spool_returned`, `spool_deleted`, `archive
 | GET | `/v1/spool-sync` | read | `spool` — live drift report: `{ok, tolerance_g, checked, drift, healable, unhealable, drifts[{spool_id, kind, summary, healable, blocks, action, detail}], last_pass, interval_s}` |
 | GET | `/v1/spool-sync/status` | none | what the scheduled pass last saw, no Spoolman request: `{enabled, interval_s, last_pass, anomalies_open}` |
 | POST | `/v1/spool-sync/heal` | write | `{spool_id?}` — heal now (what the schedule does); `{ok, before, healed, failed, after}` |
+| POST | `/v1/spool-sync/confirm-deleted` | write | — record every spool Spoolman answers 404 for as deleted (after `spoolman_empty`); `{confirmed, still_listed, after}` |
 
 Errors: `{"detail": message, "info": {...}}` — 404 unknown spool/printer/slot/location, 409
 unusable head / occupied slot / archived spool / no tare / duplicate import key, 422 invalid

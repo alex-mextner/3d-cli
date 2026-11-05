@@ -211,7 +211,7 @@ def test_heal_anchors_the_ledger_once_and_a_second_heal_changes_nothing(
     anchor = http.ledger(sid)[-1]
     assert (anchor["kind"], anchor["source"], anchor["actor"], anchor["anchor_g"]) == (
         "anchor",
-        "weigh",
+        "manual",
         "spool-sync",
         412.0,
     )
@@ -241,6 +241,26 @@ def test_heal_with_a_spool_id_touches_only_that_spool(shop: Shop, http: Http) ->
 
     assert http.post("/v1/spool-sync/heal", {"spool_id": b}).json()["ok"] is True
     assert http.drift()["ok"] is True
+
+
+def test_confirm_deleted_needs_write_and_lifts_the_wiped_spoolman_guard(shop: Shop, http: Http) -> None:
+    ids = [shop.receive() for _ in range(5)]
+    for sid in ids[:4]:
+        shop.fake.delete("spool", sid)
+    shop.ui_edit(ids[4], 412)
+
+    assert http.post("/v1/spool-sync/confirm-deleted", token="read").status_code == 403
+    assert http.post("/v1/spool-sync/confirm-deleted", token=None).status_code == 401
+    stuck = http.post("/v1/spool-sync/heal").json()
+    assert stuck["healed"] == [] and "spoolman_empty" in [d["kind"] for d in stuck["after"]["drifts"]]
+
+    done = http.post("/v1/spool-sync/confirm-deleted")
+    assert done.status_code == 200, done.text
+    body = done.json()
+    assert sorted(body["confirmed"]) == ids[:4] and body["still_listed"] == []
+    assert "spoolman_empty" not in [d["kind"] for d in body["after"]["drifts"]]
+    healed = http.post("/v1/spool-sync/heal").json()
+    assert [d["kind"] for d in healed["healed"]] == ["remaining"] and healed["ok"] is True
 
 
 @pytest.mark.parametrize("bad", ["x", True, 1.5, [1]])
@@ -390,7 +410,7 @@ def test_the_schedule_heals_a_ui_edit_without_anyone_calling_heal(
         assert rest.drift()["ok"] is True
         anchor = rest.ledger(sid)[-1]
         assert (anchor["source"], anchor["actor"], anchor["anchor_g"]) == (
-            "weigh",
+            "manual",
             "spool-sync",
             412.0,
         )

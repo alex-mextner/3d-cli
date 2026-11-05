@@ -8,6 +8,11 @@
                                   Spoolman request: {enabled, interval_s, last_pass, anomalies_open}
   POST /v1/spool-sync/heal        scope write. {"spool_id"?} heal now (the same pass the schedule
                                   runs); answers {ok, before, healed, failed, after}.
+  POST /v1/spool-sync/confirm-deleted
+                                  scope write. The owner's decision after `spoolman_empty` (most known
+                                  spools missing at once: a wiped Spoolman or a wrong URL, so nothing is
+                                  healed): record every spool Spoolman answers 404 for as deleted.
+                                  {confirmed[], still_listed[], after}
 
 BACKGROUND (router lifespan): every PRINTOPS_SPOOL_SYNC_S seconds (default 60, floor 10, 0 turns it
 off) one pass runs `printops.spool_sync.run_pass` against Spoolman through the one write path: it
@@ -195,6 +200,20 @@ def status(request: Request, conn: Db) -> dict[str, Any]:
         "last_pass": svc.last_pass(),
         "anomalies_open": len(rc.list_anomalies(conn, scope=sync.SCOPE)),
     }
+
+
+@router.post("/v1/spool-sync/confirm-deleted")
+def confirm_deleted(request: Request, conn: Db, who: Writer) -> dict[str, Any]:
+    sm = get_state(request).synced(conn)
+    if sm is None:
+        raise HTTPException(503, "Spoolman is not configured (set SPOOLMAN_URL)")
+    try:
+        with sync.PASS_LOCK:
+            done = sync.confirm_deleted(conn, sm)
+            after = sync.detect(conn, sm)
+    except SpoolmanError as e:
+        raise _spoolman_error(e) from e
+    return {**done.to_dict(), "after": after.to_dict()}
 
 
 @router.post("/v1/spool-sync/heal")

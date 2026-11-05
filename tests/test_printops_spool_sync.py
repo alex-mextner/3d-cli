@@ -187,14 +187,15 @@ def test_ui_weight_edit_becomes_a_ledger_anchor_and_spoolman_is_not_written_back
     last = world.rows(sid)[-1]
     assert (last.kind, last.source, last.actor, last.anchor_g) == (
         "anchor",
-        "weigh",
+        "manual",
         "spool-sync",
         412.0,
-    )
+    )  # a typed number is an estimate: it is not a weighing
     assert last.delta_g == -588.0 and "weight changed in Spoolman" in (last.note or "")
     assert last.confidence_g == pytest.approx(
-        10.05, abs=0.01
-    )  # scale ±1 and the tare's ±10 (tare DB), as `measure`
+        spools.MANUAL_REMAINING_FRACTION * 412.0, abs=0.01
+    )  # a hand estimate, as `receive --remaining`
+    assert ledger.estimate(world.conn, sid).last_weighed_at is None
     assert world.remaining(sid) == (412.0, 412.0)
     assert spools.view(world.conn, world.fake.get("spool", sid))[
         "remaining_text"
@@ -215,6 +216,7 @@ def test_ui_measure_dialog_is_a_weighing_too(world: World) -> None:
     world.heal()
     assert world.remaining(sid) == (446.0, 446.0)
     assert world.rows(sid)[-1].source == "weigh"
+    assert ledger.estimate(world.conn, sid).last_weighed_at is not None
 
 
 def test_sync_twice_changes_nothing(world: World) -> None:
@@ -361,10 +363,11 @@ def test_a_spool_created_in_the_ui_is_adopted_and_anchored(world: World) -> None
     # a spool that arrives already used is a weighing, not a sealed one
     used = _ui_create(world, used_weight=300.0)
     world.heal()
-    assert world.rows(used)[0].source == "weigh" and world.remaining(used) == (
+    assert world.rows(used)[0].source == "manual" and world.remaining(used) == (
         700.0,
         700.0,
-    )
+    )  # nobody weighed it: an estimate
+    assert ledger.estimate(world.conn, used).last_weighed_at is None
 
 
 def test_archiving_in_the_ui_is_recorded_and_unbinds_a_loaded_spool(
@@ -708,3 +711,138 @@ def test_the_scheduled_pass_status_and_anomalies_survive_spoolman_down(
     assert (
         len(rc.list_anomalies(world.conn, scope=spool_sync.SCOPE)) == 1
     )  # not "resolved" because we could not look
+
+
+# -- review fixes: the bookmark never moves past what was not healed -----------------------------------
+
+
+def _slot_events(world: World, sid: int) -> list[tuple[str, str]]:
+    return [
+        (kind, subject)
+        for kind, subject, payload in world.events("slot.")
+        if payload["spool_id"] == sid
+    ]
+
+
+def test_a_weight_edit_with_an_unknown_location_keeps_the_unload_until_the_location_exists(
+    world: World,
+) -> None:
+    """One UI save types a new weight and a shelf PrintOps does not know, on a spool that was in a slot:
+    the weight is healed, the move is not, and once the shelf exists the unload of the slot is recorded."""
+    sid = world.receive()
+    spools.load(world.ctx, "u1", "T3", sid, printer_write=False)
+    world.fake.update("spool", sid, {"remaining_weight": 412, "location": "WH:Q/S9"})
+    report = world.heal()
+    assert [d.kind for d in report.healed] == ["remaining"]
+    assert [d.kind for d in world.detect()] == ["location_unknown"]
+    assert ("slot.unloaded", "slot:u1/T3") not in _slot_events(world, sid)[-1:]
+
+    locations.add(world.conn, "WH:Q", "zone", actor="test")
+    locations.add(world.conn, "WH:Q/S9", "shelf", actor="test")
+    world.heal()
+
+    assert world.detect() == []
+    assert _slot_events(world, sid)[-1] == ("slot.unloaded", "slot:u1/T3")
+    moved = [e for e in world.events("spool.moved") if e[1] == f"spool:{sid}"][-1][2]
+    assert (moved["from"], moved["to"]) == ("slot:u1/T3", "WH:Q/S9")
+
+
+def test_a_slot_clash_records_nothing_and_the_load_is_recorded_once_the_clash_clears(
+    world: World,
+) -> None:
+    """B is typed into a slot A holds: no move or load of B is booked while two spools claim it; when A
+    leaves, B's move and its slot.loaded come, once."""
+    a, b = world.receive(), world.receive()
+    spools.load(world.ctx, "u1", "T3", a, printer_write=False)
+    world.fake.update("spool", b, {"location": "slot:u1/T3"})
+    moves_before = len(world.events("spool.moved"))
+    assert [d.kind for d in world.detect() if d.spool_id == b] == ["slot_conflict"]
+    world.heal()
+    assert len(world.events("spool.moved")) == moves_before
+    assert ("slot.loaded", "slot:u1/T3") not in _slot_events(world, b)
+
+    world.fake.update("spool", a, {"location": "WH:A/S1"})  # A leaves the slot in the UI
+    world.heal()
+
+    assert world.detect() == []
+    assert _slot_events(world, b)[-1] == ("slot.loaded", "slot:u1/T3")
+    assert _slot_events(world, a)[-1] == ("slot.unloaded", "slot:u1/T3")
+    world.heal()
+    assert len([e for e in _slot_events(world, b) if e[0] == "slot.loaded"]) == 1
+
+
+def test_an_archived_spool_with_a_location_printops_does_not_know_is_not_drift(
+    world: World,
+) -> None:
+    """Spoolman keeps the free-text location of every archived spool; they must not keep `spool drift`
+    and `health` failing for good."""
+    sid = world.receive()
+    world.fake.update("spool", sid, {"archived": True, "location": "old box 7"})
+    world.heal()
+    assert world.detect() == []
+
+    other = world.receive(location="WH:A/S1")
+    world.fake.update("spool", other, {"archived": True})
+    world.heal()
+    locations.archive(world.conn, world.sm, locations.get(world.conn, "WH:A/S1"), actor="test")
+    assert [d for d in world.detect() if d.spool_id == other] == []
+    assert rc.list_anomalies(world.conn, scope=spool_sync.SCOPE) == []
+
+
+def test_a_spool_that_is_not_archived_is_still_reported_for_an_unknown_location(world: World) -> None:
+    sid = world.receive()
+    world.fake.update("spool", sid, {"location": "old box 7"})
+    assert [d.kind for d in world.detect()] == ["location_unknown"]
+
+
+def _wipe_most(world: World) -> tuple[list[int], int]:
+    ids = [world.receive() for _ in range(5)]
+    for sid in ids[:4]:
+        world.fake.delete("spool", sid)
+    return ids[:4], ids[4]
+
+
+def test_a_spoolman_that_looks_wiped_heals_no_spool_at_all(world: World) -> None:
+    """The guard is for a wrong SPOOLMAN_URL or a wiped Spoolman: the survivor shares its id with
+    a foreign spool, so nothing may be anchored, emitted or written until a person confirms."""
+    gone, alive = _wipe_most(world)
+    world.fake.update("spool", alive, {"remaining_weight": 412})
+    before = world.state()
+
+    report = world.heal()
+    assert report.healed == [] and report.failed == []
+    assert world.state() == before
+    assert "spoolman_empty" in [d.kind for d in report.after.drifts]
+    only = world.heal(only=alive)  # a single-spool heal is no way around the guard
+    assert only.healed == [] and world.state() == before
+    spool_sync.run_pass(world.conn, world.sm)  # the scheduled pass opens the anomaly, nothing else
+    rows, _, writes = world.state()
+    assert (rows, writes) == (before[0], before[2])
+    assert "spoolman_empty" in world.kinds()
+
+
+def test_confirming_the_deletions_records_them_and_lifts_the_guard(world: World) -> None:
+    """The way out of `spoolman_empty`: the owner confirms; each id is checked with a 404 and recorded
+    as deleted, after which the survivor heals again."""
+    gone, alive = _wipe_most(world)
+    world.fake.update("spool", alive, {"remaining_weight": 412})
+
+    with spool_sync.PASS_LOCK:
+        result = spool_sync.confirm_deleted(world.conn, world.sm)
+
+    assert sorted(result.confirmed) == gone and result.still_listed == []
+    deleted = world.events("spool.deleted")
+    assert sorted(int(e[1].split(":")[1]) for e in deleted) == gone
+    assert "spoolman_empty" not in world.kinds()
+    assert [d.kind for d in world.heal().healed] == ["remaining"]
+    assert world.detect() == []
+
+
+def test_confirming_leaves_a_spool_that_spoolman_still_has(world: World) -> None:
+    gone, alive = _wipe_most(world)
+    with spool_sync.PASS_LOCK:
+        result = spool_sync.confirm_deleted(world.conn, world.sm)
+    assert alive not in result.confirmed
+    assert world.conn.execute(
+        "SELECT COUNT(*) FROM spool_sync WHERE state = 'deleted'"
+    ).fetchone()[0] == len(gone)
