@@ -272,6 +272,8 @@ Every current root Python module is listed here so future additions are intentio
 - `collision_check.py` — geometry / collision check implementation.
 - `collision_viz.py` — geometry / collision visualization implementation.
 - `config.py` — project and CLI configuration helpers.
+- `convert_mesh.py` — the colour-aware conversion worker behind `3d convert` (run via `cli.pyrun`): reads any convert input through `dimension_model` (+ a pxr/usd-core reader for USDZ), splits the faces into colour groups and writes an Orca project 3MF (one object per colour, per-object extruder), a merged binary STL or a multicolour USDZ.
+- `convert_plan.py` — the pure-stdlib route/collision policy of `3d convert`: format inference (extensionless outputs filled from the conversion), route legality, the auto-suffix / refuse-with-a-free-name-command contract and the staging+commit that re-checks existence at write time.
 - `debug_overlay.py` — pure planning and advisory helpers for render/reference debug overlays.
 - `errors.py` — structured CLI error model.
 - `events.py` — append-only CLI/model workflow event store.

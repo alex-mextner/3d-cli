@@ -389,6 +389,7 @@ assembly mode (the assembly must honour `-D cut=true` and colour each part outsi
 | Command | What |
 |---|---|
 | `3d export <file.scad>` | STL/[3MF](GLOSSARY.md#3mf) with manifold/self-intersect validation. **Nonzero exit on bad geometry.** |
+| `3d convert <IN...> <OUT>` | Convert between formats (`.scad .stl .3mf .usdz .obj` → `.stl .3mf .usdz .png`); a colored `.scad` becomes a true multicolour Orca project 3MF — one object per `color()` with its own extruder ([docs](docs/commands/convert.md)). |
 | `3d validate <file.scad>` | Fast syntax check (no render). |
 | `3d params <file.scad> [--json]` | Extract Customizer-style parameters. |
 | `3d om <file.scad> <selector>` | Query `.scad` object-model annotations as JSON. |
