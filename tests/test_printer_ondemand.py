@@ -162,10 +162,49 @@ class Rig:
         return self.sup.tick()
 
 
-def test_an_idle_printer_costs_no_systemctl_call_and_no_log_line_at_all() -> None:
+def test_an_idle_printer_costs_one_cheap_look_per_ten_minutes_and_no_log_line_at_all() -> (
+    None
+):
     rig = Rig()
     waits = {rig.poll(False) for _ in range(200)}  # more than an hour of polls
-    assert waits == {POLL} and rig.systemd.calls == [] and rig.log == []
+    assert waits == {POLL} and rig.log == []
+    # the only systemd traffic: the stray-worker look, one `is-active` every 20 polls
+    assert rig.systemd.calls == [["is-active", *U1_UNITS]] * (
+        200 // od.STRAY_CHECK_EVERY_POLLS
+    )
+
+
+def test_workers_started_by_hand_or_a_retry_timer_while_idle_are_stopped_after_a_grace_period() -> (
+    None
+):
+    rig = Rig()
+    for _ in range(od.STRAY_CHECK_EVERY_POLLS - 1):
+        rig.poll(False)
+    rig.systemd.running.add(
+        U1_UNITS[0]
+    )  # somebody ran `systemctl --user start 3d-printer-watch@u1`
+    rig.poll(False)
+    assert (
+        "workers run with no print" in rig.log[-1] and rig.sup.machine.phase == od.GRACE
+    )
+    rig.poll(False, GRACE - 1)
+    assert rig.systemd.running == {U1_UNITS[0]}
+    rig.poll(False, 1)
+    assert rig.systemd.running == set() and rig.sup.machine.phase == od.IDLE
+
+
+def test_the_stray_count_restarts_whenever_a_print_or_its_grace_period_is_running() -> (
+    None
+):
+    rig = Rig()
+    for _ in range(od.STRAY_CHECK_EVERY_POLLS - 1):
+        rig.poll(False)
+    rig.poll(True)
+    rig.poll(False)
+    assert (
+        rig.sup.idle_polls == 0 and rig.sup.machine.phase == od.GRACE
+    )  # grace is not "idle": no stray look
+    assert all("no print" not in line for line in rig.log)
 
 
 def test_a_print_starts_both_workers_once_and_ends_in_a_full_stop_after_the_grace_period() -> (

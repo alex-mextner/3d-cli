@@ -55,6 +55,7 @@ ExecStart=/srv/3d-cli/.venv/bin/python /srv/3d-cli/bin/3d printer watch %i
 ExecStopPost=-/srv/3d-cli/.venv/bin/python /srv/3d-cli/bin/3d printer supervise notify-failure %i watch
 Restart=always
 RestartSec=15
+SuccessExitStatus=143
 """
 
 

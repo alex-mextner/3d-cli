@@ -217,7 +217,9 @@ WantedBy=default.target
 
 
 def _worker_service(kind: str, layout: Layout, pin: str) -> str:
-    """[Service] of a worker: started and stopped by the supervisor, so no [Install] section."""
+    """[Service] of a worker: started and stopped by the supervisor, so no [Install] section. SuccessExitStatus=143:
+    the supervisor stops it with SIGTERM and `uv run` (the vision loop's launcher) answers with 143; without it
+    every stop would leave the unit `failed` and run the failure hook (#747)."""
     return f"""[Service]
 Type=simple
 Environment=PATH={layout.repo}/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
@@ -228,6 +230,7 @@ ExecStart={shlex.join(layout.exec_argv(kind))}
 ExecStopPost=-{shlex.join(layout.stop_post_argv(kind))}
 Restart=always
 RestartSec={RESTART_SEC[kind]}
+SuccessExitStatus=143
 """
 
 

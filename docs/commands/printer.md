@@ -700,6 +700,9 @@ idle ──print runs──> active ──print ends / printer lost──> grace
 - **Wedged supervisor**: `WatchdogSec=600`; systemd restarts it. There is no heartbeat file: `systemctl --user show -p
   StatusText 3d-printer-ondemand@NAME` says `printer=idle|printing|unreachable phase=idle|active|grace polled=<epoch>`.
 - **A worker that dies or is stopped by hand during a print** is started again at the next poll.
+- **A worker started by hand while the printer is idle** (or by a mount-retry timer) is found by the supervisor's stray
+  look, one `systemctl is-active` every 20 polls (10 minutes by default), and stopped after one grace period: an idle
+  printer never keeps workers running by accident.
 - **Bed monitor**: the watcher's camera bed monitor (`watch.bed.enabled`) only runs while the watcher does, i.e. during
   the print and the grace period; `3d printer bed status` and the start gate still take a fresh reading on demand.
   Raise the grace period when you want `bed_clear` events for longer.
@@ -707,6 +710,8 @@ idle ──print runs──> active ──print ends / printer lost──> grace
   `systemctl --user edit 3d-printer-ondemand@k1se` with `[Service]` `Environment=THREED_ONDEMAND_GRACE_S=900`
   (`THREED_ONDEMAND_POLL_S` likewise).
 - **The workers have no `[Install]` section**: nothing starts them at boot, and `systemctl enable` on one is refused.
+  They carry `SuccessExitStatus=143`: the supervisor stops them with SIGTERM and `uv run`, the vision launcher, answers
+  143; without it every stop would leave the unit `failed` and run the failure hook.
   `supervise install` enables the supervisor and *disables* (never stops: a print may be running) workers an older
   always-on install left enabled; the supervisor stops those after the grace period. `supervise uninstall` disables
   the supervisor and stops the workers.

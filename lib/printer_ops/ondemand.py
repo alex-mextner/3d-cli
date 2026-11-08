@@ -75,6 +75,9 @@ MAX_REPLY = (
 )  # the query answer is ~330 bytes; anything bigger is not Moonraker
 RESOLVE_TIMEOUT_S = 120.0
 RESOLVE_RETRY_MAX_S = 300.0
+# While idle, look for workers somebody started (by hand, a mount-retry timer) every this many polls: one
+# `systemctl is-active` per 10 minutes at the default poll, so an idle printer still costs ~nothing.
+STRAY_CHECK_EVERY_POLLS = 20
 ACTIVE_PRINT_STATES = frozenset({"printing", "paused"})  # Klipper print_stats.state
 CREALITY_ACTIVE = frozenset(
     {1, 5, 7}
@@ -510,6 +513,7 @@ class Supervisor:
     fails: int = 0
     last_error: str = ""
     action_error: str = ""
+    idle_polls: int = 0
 
     def __post_init__(self) -> None:
         self.machine = Machine(self.target.grace_s)
@@ -529,6 +533,23 @@ class Supervisor:
                 f"{self.target.name}: workers already running at start: kept for a fresh grace period"
             )
 
+    def _check_strays(self, printing: bool | None) -> None:
+        """Idle and nothing printing: every STRAY_CHECK_EVERY_POLLS polls, adopt workers that run anyway (started
+        by hand or by a retry timer) so they stop after one grace period instead of running for ever."""
+        if self.machine.phase != IDLE or printing:
+            self.idle_polls = 0
+            return
+        self.idle_polls += 1
+        if (
+            self.idle_polls % STRAY_CHECK_EVERY_POLLS == 0
+            and self.workers.any_running()
+        ):
+            self.machine.adopt(self.clock())
+            self.log(
+                f"{self.target.name}: workers run with no print (started by hand?): they stop after "
+                f"{self.target.grace_s:g} s"
+            )
+
     def tick(self) -> float:
         """One poll: ask, decide, act, publish. Returns the seconds to wait before the next one."""
         printing: bool | None
@@ -538,6 +559,7 @@ class Supervisor:
         except Unreachable as exc:
             printing = None
             self._unreachable(str(exc))
+        self._check_strays(printing)
         before = self.machine.phase
         action = self.machine.observe(self.clock(), printing)
         if action == START:
