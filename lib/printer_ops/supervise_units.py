@@ -239,15 +239,41 @@ def _exec_values(lines: list[str]) -> list[str]:
     ]
 
 
-def classify_dropin(path: Path, text: str, canonical: list[str]) -> DropIn:
-    """What a hand-made drop-in does to a supervision unit. `canonical` is the template's ExecStart argv with
-    the instance already substituted."""
+def _classify_exec(path: Path, command: str, canonical: list[str]) -> DropIn:
+    """A drop-in whose last ExecStart is `command`: unparseable, --dry-run, the shipped command, or custom."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return DropIn(path, "custom-exec", "ExecStart override that cannot be parsed")
+    if "--dry-run" in argv:
+        return DropIn(
+            path,
+            "dry-run",
+            "ExecStart override with --dry-run: alerts are printed, never delivered",
+        )
+    if argv == canonical:
+        return DropIn(
+            path,
+            "redundant-exec",
+            "ExecStart override equal to the shipped command (harmless)",
+        )
+    return DropIn(path, "custom-exec", f"ExecStart override: {command}")
+
+
+def _directives(text: str) -> list[str]:
+    """The non-comment, non-section lines of a unit file."""
     body = [
         ln.strip()
         for ln in text.splitlines()
         if ln.strip() and not ln.strip().startswith(("#", ";"))
     ]
-    directives = [ln for ln in body if not ln.startswith("[")]
+    return [ln for ln in body if not ln.startswith("[")]
+
+
+def classify_dropin(path: Path, text: str, canonical: list[str]) -> DropIn:
+    """What a hand-made drop-in does to a supervision unit. `canonical` is the template's ExecStart argv with
+    the instance already substituted."""
+    directives = _directives(text)
     gates = [ln for ln in directives if _GATE.match(ln)]
     if gates and len(gates) == len(directives):
         return DropIn(
@@ -258,25 +284,7 @@ def classify_dropin(path: Path, text: str, canonical: list[str]) -> DropIn:
         )
     execs = [v for v in _exec_values(directives) if v]
     if execs:
-        try:
-            argv = shlex.split(execs[-1])
-        except ValueError:
-            return DropIn(
-                path, "custom-exec", "ExecStart override that cannot be parsed"
-            )
-        if "--dry-run" in argv:
-            return DropIn(
-                path,
-                "dry-run",
-                "ExecStart override with --dry-run: alerts are printed, never delivered",
-            )
-        if argv == canonical:
-            return DropIn(
-                path,
-                "redundant-exec",
-                "ExecStart override equal to the shipped command (harmless)",
-            )
-        return DropIn(path, "custom-exec", f"ExecStart override: {execs[-1]}")
+        return _classify_exec(path, execs[-1], canonical)
     if gates:
         return DropIn(
             path,
@@ -332,6 +340,68 @@ def _stamp(now: float) -> str:
     return time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
 
 
+def _template_action(
+    kind: str, layout: Layout, installed: dict[str, str], now: float
+) -> Action | None:
+    """The write/replace that brings one template to the shipped text (None = already right)."""
+    name = template_name(kind)
+    desired = render_template(kind, layout)
+    have = installed.get(name)
+    path = layout.unit_dir / name
+    if have == desired:
+        return None
+    if have is None:
+        return Action("write", name, "new template", path=path, text=desired)
+    if is_managed(have):
+        return Action(
+            "write", name, "update the managed template", path=path, text=desired
+        )
+    how = "carries --dry-run" if "--dry-run" in have else "hand-made"
+    return Action(
+        "replace",
+        name,
+        f"replace the {how} template (a .bak-{_stamp(now)} copy is kept)",
+        needs_yes=True,
+        path=path,
+        text=desired,
+    )
+
+
+def _template_actions(
+    plans: Sequence[PrinterPlan], layout: Layout, installed: dict[str, str], now: float
+) -> list[Action]:
+    kinds = sorted({k for p in plans for k in p.kinds}, key=KINDS.index)
+    found = (_template_action(kind, layout, installed, now) for kind in kinds)
+    return [action for action in found if action is not None]
+
+
+def _enable_actions(
+    plans: Sequence[PrinterPlan], enabled: dict[str, bool], loaded_dry_run: set[str]
+) -> list[Action]:
+    """Enable-and-start units that are off; restart enabled ones whose running definition has --dry-run."""
+    actions: list[Action] = []
+    for unit in (u for plan in plans for u in plan.units()):
+        if not enabled.get(unit, False):
+            actions.append(
+                Action(
+                    "enable",
+                    unit,
+                    "enable and start",
+                    argv=["systemctl", "--user", "enable", "--now", unit],
+                )
+            )
+        elif unit in loaded_dry_run:
+            actions.append(
+                Action(
+                    "restart",
+                    unit,
+                    "the running definition still has --dry-run",
+                    argv=["systemctl", "--user", "restart", unit],
+                )
+            )
+    return actions
+
+
 def plan_install(
     plans: Sequence[PrinterPlan],
     layout: Layout,
@@ -346,48 +416,13 @@ def plan_install(
     """The ordered actions that make the supervision of `plans` right. `installed` is unit file name -> its text
     (missing = absent); `enabled` unit -> is enabled; `loaded_dry_run` the units whose RUNNING definition
     still carries --dry-run. Pure: nothing is read or written here."""
-    actions: list[Action] = []
-    kinds = sorted({k for p in plans for k in p.kinds}, key=KINDS.index)
-    for kind in kinds:
-        name = template_name(kind)
-        desired = render_template(kind, layout)
-        have = installed.get(name)
-        path = layout.unit_dir / name
-        if have == desired:
-            continue
-        if have is None:
-            actions.append(
-                Action("write", name, "new template", path=path, text=desired)
-            )
-        elif is_managed(have):
-            actions.append(
-                Action(
-                    "write",
-                    name,
-                    "update the managed template",
-                    path=path,
-                    text=desired,
-                )
-            )
-        else:
-            how = "carries --dry-run" if "--dry-run" in have else "hand-made"
-            actions.append(
-                Action(
-                    "replace",
-                    name,
-                    f"replace the {how} template (a .bak-{_stamp(now)} copy is kept)",
-                    needs_yes=True,
-                    path=path,
-                    text=desired,
-                )
-            )
+    actions = _template_actions(plans, layout, installed, now)
     actions.extend(
         Action("retire", d.path.name, d.detail, needs_yes=True, path=d.path)
         for d in dropins
         if d.retirable
     )
-    changed = bool(actions)
-    if changed:
+    if actions:
         actions.append(
             Action(
                 "reload",
@@ -406,26 +441,7 @@ def plan_install(
                 argv=["loginctl", "enable-linger"],
             )
         )
-    for plan in plans:
-        for unit in plan.units():
-            if not enabled.get(unit, False):
-                actions.append(
-                    Action(
-                        "enable",
-                        unit,
-                        "enable and start",
-                        argv=["systemctl", "--user", "enable", "--now", unit],
-                    )
-                )
-            elif unit in loaded_dry_run:
-                actions.append(
-                    Action(
-                        "restart",
-                        unit,
-                        "the running definition still has --dry-run",
-                        argv=["systemctl", "--user", "restart", unit],
-                    )
-                )
+    actions.extend(_enable_actions(plans, enabled, loaded_dry_run))
     return actions
 
 
@@ -461,31 +477,48 @@ def apply(
     for a in actions:
         label = f"{a.op} {a.target}"
         try:
-            if a.op in ("write", "replace"):
-                assert a.path is not None and a.text is not None
-                a.path.parent.mkdir(parents=True, exist_ok=True)
-                if a.op == "replace" and a.path.exists():
-                    a.path.rename(a.path.with_name(f"{a.path.name}.bak-{_stamp(now)}"))
-                _write_atomic(a.path, a.text)
-            elif a.op == "retire":
-                assert a.path is not None
-                a.path.rename(a.path.with_name(f"{a.path.name}.retired-{_stamp(now)}"))
-            elif a.op == "remove":
-                assert a.path is not None
-                a.path.unlink(missing_ok=True)
-            elif a.op == "linger":
-                if not yes:
-                    report.skipped.append(label + " (needs --yes)")
-                    continue
-                _run_checked(run, a.argv, report, label)
-                continue
-            else:
-                _run_checked(run, a.argv, report, label)
-                continue
-            report.done.append(label)
+            _apply_one(a, label, report, yes=yes, run=run, now=now)
         except OSError as exc:
             report.failed.append(f"{label}: {exc.strerror or exc}")
     return report
+
+
+def _apply_write(a: Action, now: float) -> None:
+    """`write` and `replace`: a replaced hand-made file is renamed to a .bak first so it is never lost."""
+    assert a.path is not None and a.text is not None
+    a.path.parent.mkdir(parents=True, exist_ok=True)
+    if a.op == "replace" and a.path.exists():
+        a.path.rename(a.path.with_name(f"{a.path.name}.bak-{_stamp(now)}"))
+    _write_atomic(a.path, a.text)
+
+
+def _apply_retire(a: Action, now: float) -> None:
+    assert a.path is not None
+    a.path.rename(a.path.with_name(f"{a.path.name}.retired-{_stamp(now)}"))
+
+
+def _apply_remove(a: Action) -> None:
+    assert a.path is not None
+    a.path.unlink(missing_ok=True)
+
+
+def _apply_one(
+    a: Action, label: str, report: ApplyReport, *, yes: bool, run: Runner, now: float
+) -> None:
+    """Perform one action and record it; file ops report done here, commands via `_run_checked`."""
+    if a.op in ("write", "replace"):
+        _apply_write(a, now)
+    elif a.op == "retire":
+        _apply_retire(a, now)
+    elif a.op == "remove":
+        _apply_remove(a)
+    elif a.op == "linger" and not yes:
+        report.skipped.append(label + " (needs --yes)")
+        return
+    else:
+        _run_checked(run, a.argv, report, label)
+        return
+    report.done.append(label)
 
 
 def _run_checked(run: Runner, argv: list[str], report: ApplyReport, label: str) -> None:
