@@ -379,8 +379,12 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   (a FAIL blocks; `--force` alone does not override it: a forced start needs the owner's one-time Telegram
   hatch approval, `lib/printer_ops/force_hatch.py`; fix the cause of each FAIL instead). Tests use the loopback fakes in `tests/printer_fakes.py`;
   agents never point tests or ad-hoc runs at real printers. See `docs/commands/printer.md`.
-- `printer supervise status|install|uninstall|quiet` is the ALWAYS-ON AI supervision (`printer_ops/supervise.py`,
-  `supervise_units.py`, doctor check `printer-supervision`): the `3d-printer-watch@NAME` / `3d-printer-vision@NAME` user
+- `printer supervise status|install|uninstall|quiet` is the ON-DEMAND AI supervision (`printer_ops/supervise.py`,
+  `supervise_units.py`, `ondemand.py`, doctor check `printer-supervision`, #747): a tiny always-on
+  `3d-printer-ondemand@NAME` supervisor (stdlib only, ~18 MB, one request per 30 s, no disk, `Type=notify`) starts the
+  `3d-printer-watch@NAME` / `3d-printer-vision@NAME` workers only while a print runs and stops them after a grace
+  period (the workers have no `[Install]`; a stopped worker is the right state for an idle printer; keep
+  `ondemand.py` free of heavy imports: `tests/e2e/test_printer_ondemand_workflows.py` pins its RSS). The user
   units are SHIPPED from the repo (no hand-made unit, no `--dry-run`, no gate on a marker; `watch --install-service`
   is gone), `Restart=always`, linger, waiting for a switched-off printer, catching a print start from any route, with
   a heartbeat that `status`/doctor judge and an `ExecStopPost` one-line tg when a supervisor dies during a print.
