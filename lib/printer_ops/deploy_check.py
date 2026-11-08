@@ -69,7 +69,7 @@ def systemctl_show(unit: str) -> str:
     r = subprocess.run(
         ["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
          "-p", "UnitFileState", "-p", "NRestarts", "-p", "ActiveEnterTimestamp",
-         "-p", "ExecStart", "-p", "EnvironmentFiles"],
+         "-p", "ExecStart", "-p", "EnvironmentFiles", "-p", "StatusText"],
         capture_output=True, text=True, timeout=15, check=False,
     )
     return r.stdout if r.returncode == 0 else ""
@@ -130,9 +130,13 @@ def check_printer(name: str, has_camera: bool, show: Show,
     verdict.units = [check_unit(f"3d-printer-{kind}@{name}.service", show, read) for kind in SERVICES]
     by = dict(zip(SERVICES, verdict.units, strict=True))
     if not by["vision"].running:
-        verdict.warnings.append(
-            f"no running vision service: nothing watches {name}'s camera "
-            f"(3d-printer-vision@{name}.service is {by['vision'].state})")
+        # #747: the vision unit exists only while a print runs; its supervisor being up is the expected idle state
+        supervisor = check_unit(f"3d-printer-ondemand@{name}.service", show, read)
+        if not supervisor.running:
+            verdict.warnings.append(
+                f"no running vision service and no running supervisor: nothing watches {name}'s camera "
+                f"(3d-printer-vision@{name}.service is {by['vision'].state}, "
+                f"3d-printer-ondemand@{name}.service is {supervisor.state})")
     return verdict
 
 
@@ -152,6 +156,20 @@ def fix_commands(name: str, unit: UnitVerdict) -> list[str]:
     ]
 
 
+def _unit_lines(printer: str, u: UnitVerdict) -> list[str]:
+    """The verdict line of one unit and, for a failing one, the commands that fix it."""
+    mark = "FAIL" if not u.ok else ("ok  " if u.running else "idle")
+    extra = ""
+    if u.state == "unknown":
+        extra = " cannot be inspected (no `systemctl --user` here): run this on the host of the services"
+    elif not u.ok:
+        extra = f" runs with --dry-run (in {u.source}): events are printed, never delivered"
+    lines = [f"{mark} {u.unit}: {u.state}{extra}{' — ' + u.note if u.note else ''}"]
+    if not u.ok and u.state != "unknown":
+        lines += [f"       $ {c}" for c in fix_commands(printer, u)]
+    return lines
+
+
 def render(verdicts: list[PrinterVerdict]) -> str:
     lines: list[str] = []
     for v in verdicts:
@@ -159,15 +177,7 @@ def render(verdicts: list[PrinterVerdict]) -> str:
             lines.append(f"{v.printer}: no camera, nothing to check")
             continue
         for u in v.units:
-            mark = "FAIL" if not u.ok else ("ok  " if u.running else "idle")
-            extra = ""
-            if u.state == "unknown":
-                extra = " cannot be inspected (no `systemctl --user` here): run this on the host of the services"
-            elif not u.ok:
-                extra = f" runs with --dry-run (in {u.source}): events are printed, never delivered"
-            lines.append(f"{mark} {u.unit}: {u.state}{extra}{' — ' + u.note if u.note else ''}")
-            if not u.ok and u.state != "unknown":
-                lines += [f"       $ {c}" for c in fix_commands(v.printer, u)]
+            lines += _unit_lines(v.printer, u)
         lines += [f"warn {w}" for w in v.warnings]
     return "\n".join(lines)
 
@@ -183,35 +193,47 @@ commands to fix it and to prove delivery; 0 otherwise (warnings for a missing vi
   3d printer vision doctor u1 --json"""
 
 
+def _json_doc(verdicts: list[PrinterVerdict]) -> list[dict[str, object]]:
+    return [{"printer": v.printer, "camera": v.camera, "warnings": v.warnings,
+             "units": [{"unit": u.unit, "state": u.state, "dry_run": u.dry_run, "ok": u.ok, "source": u.source}
+                       for u in v.units]}
+            for v in verdicts]
+
+
+def _names(argv: list[str], devices: dict[str, object]) -> list[str]:
+    """The printer NAMEs of the command line; an unknown option or printer is a usage error."""
+    from errors import UsageError
+
+    flags = {a for a in argv if a.startswith("-")}
+    if flags - {"--json"}:
+        raise UsageError(f"unknown option {sorted(flags - {'--json'})[0]}", command="printer vision doctor",
+                         remediation=[USAGE])
+    names = [a for a in argv if not a.startswith("-")]
+    for n in names:
+        if n not in devices:
+            raise UsageError(f"unknown printer {n!r}", command="printer vision doctor",
+                             remediation=[f"configured: {', '.join(sorted(devices)) or 'none'}"])
+    return names
+
+
 def run(argv: list[str], show: Show = systemctl_show) -> int:
     import json
 
-    from errors import GateFailure, UsageError
+    from errors import GateFailure
     from printer_ops.camera import camera_spec
     from printer_ops.devices import load_devices
 
     if "-h" in argv or "--help" in argv:
         print(USAGE)
         return 0
-    flags = {a for a in argv if a.startswith("-")}
-    if flags - {"--json"}:
-        raise UsageError(f"unknown option {sorted(flags - {'--json'})[0]}", command="printer vision doctor",
-                         remediation=[USAGE])
-    names = [a for a in argv if not a.startswith("-")]
     devices = load_devices()
-    for n in names:
-        if n not in devices:
-            raise UsageError(f"unknown printer {n!r}", command="printer vision doctor",
-                             remediation=[f"configured: {', '.join(sorted(devices)) or 'none'}"])
+    names = _names(argv, dict(devices))
     verdicts = [
         check_printer(n, camera_spec(d).present, show)
         for n, d in sorted(devices.items()) if not names or n in names
     ]
-    if "--json" in flags:
-        print(json.dumps([{"printer": v.printer, "camera": v.camera, "warnings": v.warnings,
-                           "units": [{"unit": u.unit, "state": u.state, "dry_run": u.dry_run,
-                                      "ok": u.ok, "source": u.source} for u in v.units]}
-                          for v in verdicts], indent=1))
+    if "--json" in argv:
+        print(json.dumps(_json_doc(verdicts), indent=1))
     else:
         print(render(verdicts))
     bad = [(v, u) for v in verdicts for u in v.failures]

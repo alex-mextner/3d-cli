@@ -40,7 +40,7 @@ from printops.fleet import Fleet
 
 WATCH_SNAPSHOT = """# managed-by: 3d printer supervise install (do not edit; override with a drop-in)
 [Unit]
-Description=3D printer watch %i (always on: Klipper state, errors, pauses, print start; AI alerts + auto pause)
+Description=3D printer watch %i (while a print runs: Klipper state, errors, pauses; AI alerts + auto pause)
 Documentation=https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md#always-on-supervision
 After=network-online.target hsw-observer-agent.service
 StartLimitIntervalSec=0
@@ -55,9 +55,6 @@ ExecStart=/srv/3d-cli/.venv/bin/python /srv/3d-cli/bin/3d printer watch %i
 ExecStopPost=-/srv/3d-cli/.venv/bin/python /srv/3d-cli/bin/3d printer supervise notify-failure %i watch
 Restart=always
 RestartSec=15
-
-[Install]
-WantedBy=default.target
 """
 
 
@@ -144,10 +141,12 @@ def test_plan_printers_takes_owned_full_access_printers_with_a_watch_adapter_and
         ("a", True, ("watch", "vision")),
         ("b", False, ("watch",)),
     ]
-    assert plans[0].units() == [
+    assert plans[0].worker_units() == [
         "3d-printer-watch@a.service",
         "3d-printer-vision@a.service",
     ]
+    assert plans[0].supervisor_unit() == "3d-printer-ondemand@a.service"
+    assert plans[0].units() == [plans[0].supervisor_unit(), *plans[0].worker_units()]
 
 
 def test_no_fleet_means_no_printers() -> None:
@@ -182,13 +181,12 @@ def test_a_fresh_install_writes_the_templates_reloads_and_enables_every_unit(
     code, runner = run_install(tmp_path, Systemd(), "--all")
     assert code == 0
     units = tmp_path / "units"
-    assert su.is_managed((units / "3d-printer-watch@.service").read_text())
-    assert su.is_managed((units / "3d-printer-vision@.service").read_text())
+    for kind in ("ondemand", "watch", "vision"):
+        assert su.is_managed((units / f"3d-printer-{kind}@.service").read_text())
     systemctl = [c for c in runner.calls if c[0] == "systemctl"]
     assert systemctl == [
         ["systemctl", "--user", "daemon-reload"],
-        ["systemctl", "--user", "enable", "--now", "3d-printer-watch@p1.service"],
-        ["systemctl", "--user", "enable", "--now", "3d-printer-vision@p1.service"],
+        ["systemctl", "--user", "enable", "--now", "3d-printer-ondemand@p1.service"],
     ]
     assert "check: 3d printer supervise status" in capsys.readouterr().out
 
@@ -203,9 +201,10 @@ def test_a_printer_without_a_camera_gets_no_vision_unit(tmp_path: Path) -> None:
         "--user",
         "enable",
         "--now",
-        "3d-printer-watch@p1.service",
+        "3d-printer-ondemand@p1.service",
     ] in runner.calls
     assert not any("vision" in " ".join(c) for c in runner.calls)
+    assert not any("watch" in " ".join(c) for c in runner.calls)
 
 
 def test_install_is_idempotent(tmp_path: Path, capsys: Any) -> None:
@@ -376,7 +375,7 @@ def test_uninstall_disables_units_and_removes_managed_templates_only_with_yes(
         "--user",
         "disable",
         "--now",
-        "3d-printer-watch@p1.service",
+        "3d-printer-ondemand@p1.service",
     ] in runner.calls
 
 
@@ -544,11 +543,11 @@ def test_the_marker_no_longer_gates_anything_it_is_only_shown(
 
 
 def test_a_unit_held_by_a_gate_dropin_says_why(tmp_path: Path) -> None:
-    d = tmp_path / "units" / "3d-printer-watch@p1.service.d"
+    d = tmp_path / "units" / "3d-printer-ondemand@p1.service.d"
     d.mkdir(parents=True)
     (d / "intentional-off.conf").write_text(GATE)
     systemd = Systemd(
-        {"3d-printer-watch@p1.service": unit_show("inactive", sub="dead")}
+        {"3d-printer-ondemand@p1.service": unit_show("inactive", sub="dead")}
     )
     a = assess_status(tmp_path, systemd, state="idle", camera=False)
     texts = [f.text for f in a.findings]
@@ -591,7 +590,7 @@ def test_status_exits_1_on_a_fail_and_0_otherwise_with_json(
         and doc[0]["level"] == "ok"
         and doc[0]["job"]["file"] == "a.gcode"
     )
-    assert doc[0]["units"]["watch"]["enabled"] is True and doc[0]["linger"] is True
+    assert doc[0]["units"]["ondemand"]["enabled"] is True and doc[0]["linger"] is True
     with pytest.raises(GateFailure):
         sv.run(["status"], env_for(tmp_path, Systemd()))
     text = capsys.readouterr().out
@@ -615,9 +614,13 @@ def test_status_does_not_ask_the_printer_with_no_live(
         AssertionError("the printer was contacted")
     )
     assert sv.run(["status", "--no-live"], env) == 0
-    assert "printer printing" in capsys.readouterr().out  # the watcher's own fresh reading stands in
+    assert (
+        "printer printing" in capsys.readouterr().out
+    )  # the watcher's own fresh reading stands in
     quiet = env_for(tmp_path / "other", healthy())
-    assert sv.run(["status", "--no-live"], quiet) == 0  # no heartbeat, printer not asked: a warning
+    assert (
+        sv.run(["status", "--no-live"], quiet) == 0
+    )  # no heartbeat, printer not asked: a warning
     assert "printer unknown (not asked)" in capsys.readouterr().out
 
 
@@ -632,7 +635,9 @@ def test_quiet_writes_and_clears_the_marker_and_never_touches_a_unit(
     env = env_for(tmp_path, healthy(), runner)
     assert sv.run(["quiet", "p1", "--reason", "off for the week"], env) == 0
     marker = intentional_off.read_marker("p1")
-    assert marker is not None and marker["reason"] == "off for the week" and "at" in marker
+    assert (
+        marker is not None and marker["reason"] == "off for the week" and "at" in marker
+    )
     assert "keep running" in capsys.readouterr().out and runner.calls == []
     assert sv.run(["quiet", "p1", "--clear"], env) == 0 and not intentional_off.is_set(
         "p1"
@@ -716,7 +721,9 @@ def test_an_unreadable_or_ancient_heartbeat_does_not_hide_a_death(
     tg = Tg()
     notify(tmp_path, tg)  # no heartbeat at all
     assert len(tg.sent) == 1
-    write_watch_beat(tmp_path / "state", "p1", age=5000.0, job=None)  # ancient: says nothing about the print now
+    write_watch_beat(
+        tmp_path / "state", "p1", age=5000.0, job=None
+    )  # ancient: says nothing about the print now
     assert sv.printing_when_stopped("p1", "watch", tmp_path / "state", NOW) is True
 
 
@@ -761,3 +768,231 @@ def test_the_default_tg_runner_refuses_to_run_under_pytest(
 def test_the_default_systemctl_runner_refuses_to_run_under_pytest() -> None:
     with pytest.raises(RuntimeError, match="refusing to run systemctl from a test"):
         su.real_runner(["systemctl", "--user", "daemon-reload"])
+
+
+# ---- on demand supervision (#747): a supervisor that starts the workers only while a print runs ---------
+
+
+ONDEMAND_SNAPSHOT = """# managed-by: 3d printer supervise install (do not edit; override with a drop-in)
+[Unit]
+Description=3D printer supervisor %i (always on, tiny: starts the watch and vision workers only while a print runs)
+Documentation=https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md#on-demand-supervision-747
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+WatchdogSec=600
+Environment=PATH=/srv/3d-cli/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH=/srv/3d-cli/lib
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/srv/3d-cli
+UMask=0077
+MemoryMax=96M
+ExecStart=/srv/3d-cli/.venv/bin/python -m printer_ops.ondemand %i
+Restart=always
+RestartSec=30
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def test_the_supervisor_unit_is_a_snapshot_of_the_shipped_definition() -> None:
+    assert su.render_template("ondemand", LAYOUT) == ONDEMAND_SNAPSHOT
+
+
+@pytest.mark.parametrize("kind", su.KINDS)
+def test_a_worker_unit_has_no_install_section_so_it_cannot_start_at_boot(
+    kind: str,
+) -> None:
+    text = su.render_template(kind, LAYOUT)
+    assert "[Install]" not in text and "WantedBy" not in text
+
+
+def _polled(seconds_ago: float, printer: str = "idle", phase: str = "idle") -> str:
+    return f"printer={printer} phase={phase} polled={int(NOW - seconds_ago)}"
+
+
+def _on_demand(status_text: str, *, camera: bool = True, **over: Any) -> Systemd:
+    """The supervisor runs with `status_text`; the workers are stopped (nothing prints)."""
+    systemd = healthy(camera=camera, status_text=status_text, **over)
+    for kind in ("watch", "vision"):
+        unit = f"3d-printer-{kind}@p1.service"
+        if unit in systemd.units:
+            systemd.units[unit] = unit_show(
+                "inactive", sub="dead", enabled="static", args=f"printer {kind} p1"
+            )
+    return systemd
+
+
+def test_an_idle_printer_with_a_running_supervisor_and_stopped_workers_is_ok(
+    tmp_path: Path,
+) -> None:
+    a = assess_status(tmp_path, _on_demand(_polled(5)), state="idle")
+    assert a.level == sv.OK
+    assert not findings(a, sv.WARN) and not findings(a, sv.FAIL)
+    assert not any("watch" in f.text or "vision" in f.text for f in a.findings)
+
+
+def test_a_switched_off_printer_with_a_running_supervisor_and_stopped_workers_is_ok(
+    tmp_path: Path,
+) -> None:
+    a = assess_status(tmp_path, _on_demand(_polled(5)), state=None)
+    assert a.level == sv.OK
+    assert not findings(a, sv.WARN) and not findings(a, sv.FAIL)
+
+
+def test_a_print_that_started_within_one_poll_warns_not_running_yet(
+    tmp_path: Path,
+) -> None:
+    a = assess_status(tmp_path, _on_demand(_polled(10)), state="printing")
+    assert a.level == sv.WARN and not findings(a, sv.FAIL)
+    assert any("not running yet" in t for t in findings(a, sv.WARN))
+
+
+def test_a_printing_printer_whose_supervisor_polled_long_ago_fails_for_stopped_workers(
+    tmp_path: Path,
+) -> None:
+    a = assess_status(tmp_path, _on_demand(_polled(120)), state="printing")
+    assert a.level == sv.FAIL
+    assert any("is inactive" in t for t in findings(a, sv.FAIL))
+
+
+def test_a_supervisor_that_tried_to_start_the_workers_and_failed_is_a_fail(
+    tmp_path: Path,
+) -> None:
+    text = _polled(10, printer="printing", phase="active")
+    a = assess_status(tmp_path, _on_demand(text), state="printing")
+    assert a.level == sv.FAIL
+    assert not any("not running yet" in f.text for f in a.findings)
+
+
+def test_a_missing_supervisor_fails_for_a_printer_that_answers_and_warns_for_one_that_is_off(
+    tmp_path: Path,
+) -> None:
+    missing = healthy(supervisor=False)
+    on = assess_status(tmp_path, missing, state="idle")
+    off = assess_status(tmp_path, missing, state=None)
+    assert on.level == sv.FAIL and off.level == sv.WARN
+    assert any(
+        "ondemand unit" in t and "not installed" in t for t in findings(on, sv.FAIL)
+    )
+
+
+def test_running_workers_are_never_required_enabled_but_the_supervisor_is(
+    tmp_path: Path,
+) -> None:
+    beats(tmp_path)
+    ok = assess_status(
+        tmp_path, healthy()
+    )  # workers are `static`: started by the supervisor
+    assert ok.level == sv.OK
+    assert not any("not enabled" in f.text for f in ok.findings)
+    systemd = healthy()
+    systemd.units["3d-printer-ondemand@p1.service"] = unit_show(
+        enabled="disabled", args="-m printer_ops.ondemand p1"
+    )
+    bad = assess_status(tmp_path, systemd)
+    assert any("ondemand" in t and "not enabled" in t for t in findings(bad, sv.WARN))
+
+
+def test_no_live_status_reads_the_printer_state_from_the_supervisor_poll(
+    tmp_path: Path, capsys: Any
+) -> None:
+    idle = env_for(tmp_path / "idle", _on_demand(_polled(10)))
+    assert sv.run(["status", "--no-live"], idle) == 0
+    assert "printer idle" in capsys.readouterr().out
+    printing = _on_demand(_polled(100, printer="printing", phase="idle"))
+    with pytest.raises(GateFailure):
+        sv.run(["status", "--no-live"], env_for(tmp_path / "busy", printing))
+    assert "printer printing" in capsys.readouterr().out
+
+
+def test_no_live_status_with_a_printing_poll_still_requires_the_workers_to_run(
+    tmp_path: Path,
+) -> None:
+    text = _polled(100, printer="printing", phase="idle")
+    a = sv.gather(
+        plan(),
+        env_for(tmp_path, _on_demand(text)),
+        live=False,
+        layout=LAYOUT,
+        linger=True,
+    )
+    assert a.state == "printing" and a.level == sv.FAIL
+
+
+def test_a_fresh_install_writes_ondemand_then_the_workers_and_enables_only_the_supervisor(
+    tmp_path: Path,
+) -> None:
+    _, runner = run_install(tmp_path, Systemd(), "--all")
+    units = tmp_path / "units"
+    ondemand = (units / "3d-printer-ondemand@.service").read_text()
+    assert su.is_managed(ondemand) and "-m printer_ops.ondemand %i" in ondemand
+    assert sorted(p.name for p in units.iterdir()) == [
+        "3d-printer-ondemand@.service",
+        "3d-printer-vision@.service",
+        "3d-printer-watch@.service",
+    ]
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl"]
+    assert systemctl == [
+        ["daemon-reload"],
+        ["enable", "--now", "3d-printer-ondemand@p1.service"],
+    ]
+    assert not any(c[2] == "disable" for c in runner.calls if c[0] == "systemctl")
+
+
+def test_install_plan_orders_templates_ondemand_watch_vision() -> None:
+    actions = su.plan_install(
+        [plan()],
+        LAYOUT,
+        installed={},
+        dropins=[],
+        linger=True,
+        enabled={},
+        loaded_dry_run=set(),
+        now=NOW,
+    )
+    templates = [a.target for a in actions if a.op == "write"]
+    assert templates == [
+        "3d-printer-ondemand@.service",
+        "3d-printer-watch@.service",
+        "3d-printer-vision@.service",
+    ]
+    ops = [a.op for a in actions]
+    assert ops.index("reload") > max(i for i, op in enumerate(ops) if op == "write")
+
+
+def test_a_legacy_always_on_install_gets_its_workers_disabled_without_stopping_them(
+    tmp_path: Path,
+) -> None:
+    legacy = healthy(supervisor=False, enabled="enabled")
+    run_install(tmp_path, Systemd(), "--all")
+    _, runner = run_install(tmp_path, legacy, "--all")
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    assert ["enable", "--now", "3d-printer-ondemand@p1.service"] in systemctl
+    assert ["disable", "3d-printer-watch@p1.service"] in systemctl
+    assert ["disable", "3d-printer-vision@p1.service"] in systemctl
+    assert not any(c[0] in ("stop", "disable") and "--now" in c for c in systemctl)
+    assert not any(c[0] == "stop" for c in systemctl)
+    assert not any(c[:2] == ["enable", "--now"] and "watch" in c[-1] for c in systemctl)
+
+
+def test_uninstall_stops_the_unenabled_workers_and_disables_the_supervisor_with_now(
+    tmp_path: Path,
+) -> None:
+    run_install(tmp_path, Systemd(), "--all")
+    units = tmp_path / "units"
+    runner = Runner()
+    env = env_for(tmp_path, healthy(), runner)
+    sv.cmd_uninstall(["--all", "--yes", "--unit-dir", str(units)], env)
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    assert ["disable", "--now", "3d-printer-ondemand@p1.service"] in systemctl
+    assert ["stop", "3d-printer-watch@p1.service"] in systemctl
+    assert ["stop", "3d-printer-vision@p1.service"] in systemctl
+    assert not any(
+        c[:2] == ["disable", "--now"] and "watch" in c[-1] for c in systemctl
+    )
+    assert not list(units.glob("3d-printer-*@.service"))

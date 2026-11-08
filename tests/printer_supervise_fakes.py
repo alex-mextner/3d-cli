@@ -15,10 +15,12 @@ from printer_ops import supervise_units as su
 from printer_ops.subscriptions import DeliveryState
 
 NOW = 1_800_000_000.0  # the doctor rig's ManualClock starts here too
-LAYOUT = su.Layout(Path("/srv/3d-cli"), Path("/srv/3d-cli/.venv/bin/python"), Path("/unused"), None)
-CAMERA = {"vision": {"camera": {"kind": "snapshot-url", "url": "http://127.0.0.1:1/snap"}}}
-
-
+LAYOUT = su.Layout(
+    Path("/srv/3d-cli"), Path("/srv/3d-cli/.venv/bin/python"), Path("/unused"), None
+)
+CAMERA = {
+    "vision": {"camera": {"kind": "snapshot-url", "url": "http://127.0.0.1:1/snap"}}
+}
 
 
 def unit_show(
@@ -29,8 +31,10 @@ def unit_show(
     sub: str = "running",
     restarts: int = 0,
     load: str = "loaded",
+    status_text: str = "",
 ) -> str:
-    return (
+    status = f"StatusText={status_text}\n" if status_text else ""
+    return status + (
         f"LoadState={load}\nActiveState={active}\nSubState={sub}\nUnitFileState={enabled}\nNRestarts={restarts}\n"
         f"ExecStart={{ path=/usr/bin/3d ; argv[]=/usr/bin/3d {args} ; ignore_errors=no ; pid=0 }}\n"
         "EnvironmentFiles=\n"
@@ -47,15 +51,30 @@ class Systemd:
         return self.units.get(unit, "LoadState=not-found\nActiveState=inactive\n")
 
 
-def healthy(name: str = "p1", camera: bool = True, **over: Any) -> Systemd:
-    units = {
-        f"3d-printer-watch@{name}.service": unit_show(
-            args=f"printer watch {name}", **over
-        ),
-    }
-    if camera:
-        units[f"3d-printer-vision@{name}.service"] = unit_show(
-            args=f"printer vision {name}", **over
+def healthy(
+    name: str = "p1",
+    camera: bool = True,
+    *,
+    status_text: str = "",
+    supervisor: bool = True,
+    **over: Any,
+) -> Systemd:
+    """A supervisor that runs (enabled) and workers that run too (not enabled: the supervisor starts them,
+    `enabled` in `over` overrides both). `status_text` is the supervisor's StatusText."""
+    units: dict[str, str] = {}
+    if supervisor:
+        units[f"3d-printer-ondemand@{name}.service"] = unit_show(
+            **{
+                "enabled": "enabled",
+                "args": f"-m printer_ops.ondemand {name}",
+                "status_text": status_text,
+                **over,
+            }
+        )
+    kinds = ("watch", "vision") if camera else ("watch",)
+    for kind in kinds:
+        units[f"3d-printer-{kind}@{name}.service"] = unit_show(
+            **{"enabled": "static", "args": f"printer {kind} {name}", **over}
         )
     return Systemd(units)
 

@@ -51,9 +51,13 @@ class LiveSystemd(Runner):
 
     def __call__(self, argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         if list(argv[:3]) == ["systemctl", "--user", "enable"]:
-            unit = argv[-1]
-            self.systemd.units[unit] = unit_show(
-                args=f"printer {unit.split('-')[2].split('@')[0]} p1"
+            for kind in ("watch", "vision"):
+                self.systemd.units[f"3d-printer-{kind}@p1.service"] = unit_show(
+                    "inactive", sub="dead", enabled="static", args=f"printer {kind} p1"
+                )
+            self.systemd.units[argv[-1]] = unit_show(
+                args="-m printer_ops.ondemand p1",
+                status_text="printer=idle phase=idle polled=1800000000",
             )
         return super().__call__(argv)
 
@@ -208,8 +212,9 @@ def test_the_fix_with_yes_installs_the_units_and_the_check_passes_afterwards(
         "--user",
         "enable",
         "--now",
-        "3d-printer-vision@p1.service",
+        "3d-printer-ondemand@p1.service",
     ] in live.calls
+    assert not any("3d-printer-vision@p1" in " ".join(c) for c in live.calls)
     assert not any(c[0] == "tg" for c in live.calls)  # the fix never messages anyone
 
 

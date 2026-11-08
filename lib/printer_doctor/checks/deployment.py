@@ -75,32 +75,40 @@ def _run(ctx: Context) -> Verdict:
     return Verdict.ok("vision and watch services run without --dry-run", units=units)
 
 
+def _unit_fix_steps(ctx: Context, row: object) -> list[str]:
+    """The fix commands for one evidence row, none for a healthy or an uninspectable unit."""
+    from printer_ops.deploy_check import UnitVerdict, fix_commands
+
+    if not isinstance(row, Mapping):
+        return []
+    unit = UnitVerdict(
+        str(row.get("unit")),
+        str(row.get("state")),
+        row.get("dry_run") is True,
+        str(row.get("source") or ""),
+    )
+    if unit.ok or unit.state == "unknown":
+        return []
+    return [
+        command(c) if c.split(None, 1)[0] in ("systemctl", "3d") else c
+        for c in fix_commands(ctx.name, unit)
+    ]
+
+
 def _steps(ctx: Context, result: CheckResult) -> list[str]:
     """The fix commands for the units the run itself found failing (rebuilt from its evidence, so
     systemd is asked once, not again for the steps)."""
-    from printer_ops.deploy_check import UnitVerdict, fix_commands
-
-    steps: list[str] = []
     units = result.evidence.get("units")
-    for row in units if isinstance(units, list) else []:
-        if not isinstance(row, Mapping):
-            continue
-        unit = UnitVerdict(
-            str(row.get("unit")),
-            str(row.get("state")),
-            row.get("dry_run") is True,
-            str(row.get("source") or ""),
-        )
-        if not unit.ok and unit.state != "unknown":
-            steps += [
-                command(c) if c.split(None, 1)[0] in ("systemctl", "3d") else c
-                for c in fix_commands(ctx.name, unit)
-            ]
+    steps = [
+        step
+        for row in (units if isinstance(units, list) else [])
+        for step in _unit_fix_steps(ctx, row)
+    ]
     if not steps:
         name = shlex.quote(ctx.name)
+        # #747: only the supervisor is enabled; it starts the vision and watch workers while a print runs
         steps = [
-            command(f"systemctl --user enable --now 3d-printer-vision@{name}.service"),
-            command(f"systemctl --user enable --now 3d-printer-watch@{name}.service"),
+            command(f"systemctl --user enable --now 3d-printer-ondemand@{name}.service")
         ]
     return steps
 
