@@ -29,6 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LIB = REPO_ROOT / "lib"
 TMUX = shutil.which("tmux")
 SYSTEMD_RUN = shutil.which("systemd-run")
+# the user manager is reached through the REAL runtime dir; the autouse fixture points XDG_RUNTIME_DIR at a temp one
+USER_MANAGER_ENV = {**os.environ}
 
 
 def _systemd_scope_works() -> bool:
@@ -171,6 +173,7 @@ class Rig:
             capture_output=True,
             text=True,
             timeout=120,
+            env=USER_MANAGER_ENV,
         )
         journal = subprocess.run(
             ["journalctl", "--user", "-u", unit, "-o", "cat", "--no-pager"],

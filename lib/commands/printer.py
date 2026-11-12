@@ -97,11 +97,17 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        uneven first layer): tg --photo warnings only, never a stop,
                                        and a monitor-report/ folder at the end; --no-quality
   supervise status|install|uninstall|quiet [NAME...|--all]
-                                       the ALWAYS-ON supervision: one watch + one vision systemd user unit per
-                                       owned printer from the fleet registry, running without a login, waiting
-                                       for a switched-off printer, catching every print start; `status` FAILs
-                                       when a printing/answering printer is unsupervised
+                                       the ON-DEMAND supervision: one systemd timer per owned printer
+                                       (`ondemand`, below; no process between checks) whose one-shot check
+                                       starts the watch and vision systemd user units only while a print runs,
+                                       from the fleet registry, running without a login, waiting for a
+                                       switched-off printer, catching every print start; `status` FAILs when a
+                                       printing/answering printer is unsupervised
                                        (see `3d printer supervise --help`)
+  ondemand NAME [--grace S] [--once]   the check itself (what the timer runs every 30 s, ~20 ms, RAM state only):
+                                       one small request to the printer, starts the watch + vision workers
+                                       while a print runs, stops them completely a grace period after it;
+                                       --once shows what it sees (see `3d printer ondemand --help`)
   vision NAME [options]                camera failure detection (spaghetti, detached part, stale/dark camera)
                                        and print quality (stringing, lost bead pattern, uneven first layer:
                                        warnings only, --no-quality) into the same event sinks as watch; also
@@ -235,7 +241,7 @@ Examples:
 
 # Subcommands that take the printer as a positional NAME: `-n` is refused for them.
 _NAME_AS_POSITIONAL = frozenset({
-    "list", "status", "upload", "start", "slot", "cancel", "evidence", "watch", "supervise", "vision", "guard", "bed",
+    "list", "status", "upload", "start", "slot", "cancel", "evidence", "watch", "supervise", "ondemand", "vision", "guard", "bed",
     "subscribe", "unsubscribe", "subscriptions", "agent", "doctor",
 })
 _VALUE = {"--secs", "--as", "--source-3mf", "--bridge-max", "--colour-delta-e", "--fix-max-delta-e"}
@@ -755,6 +761,12 @@ def _run_supervise(rest: list[str], name: str | None) -> int:
     return supervise(rest)
 
 
+def _run_ondemand(rest: list[str], name: str | None) -> int:
+    from printer_ops.ondemand import main as ondemand
+
+    return ondemand(rest)
+
+
 def _run_guard(rest: list[str], name: str | None) -> int:
     from printer_ops.guard import run as guard
 
@@ -799,7 +811,7 @@ def _run_alias(sub: str, rest: list[str], name: str | None) -> int:
     if aliased is not None:
         return aliased
     raise UsageError(f"unknown subcommand '{sub}'", command="printer",
-                     remediation=["Use list, status, upload, start, slot, cancel, evidence, watch, supervise, vision, guard, bed, subscribe, unsubscribe, "
+                     remediation=["Use list, status, upload, start, slot, cancel, evidence, watch, supervise, ondemand, vision, guard, bed, subscribe, unsubscribe, "
                                   "subscriptions, agent, doctor, todo (issues), macro, aliases or an alias (home, level, load, ...) — see `3d printer --help`."])
 
 
@@ -823,6 +835,7 @@ _SUBCOMMANDS: dict[str, Callable[[list[str], str | None], int]] = {
     "evidence": _run_evidence,
     "watch": _run_watch,
     "supervise": _run_supervise,
+    "ondemand": _run_ondemand,
     "vision": lambda rest, name: _cmd_vision(rest),
     "guard": _run_guard,
     "bed": lambda rest, name: _cmd_bed(rest),

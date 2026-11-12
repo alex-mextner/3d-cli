@@ -93,6 +93,9 @@ def _isolate_state_home(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytes
     connected to a fake named like a real printer deleted the owner's real marker. Every test gets its own empty
     state home; a test that wants a specific one still sets XDG_STATE_HOME itself (the later setenv wins)."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))
+    # the on-demand check's state (`printer_ops.ondemand.state_dir`) lives in the runtime directory: a test that
+    # names a real printer must not read what the real timer wrote for it
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("xdg-runtime")))
 
 
 @pytest.hookimpl(optionalhook=True)

@@ -18,6 +18,7 @@ from printer_doctor_fakes import agent_sources, rig, target
 from printer_ops.base import PrinterStatus
 from printer_supervise_fakes import (
     CAMERA,
+    MONO,
     Runner,
     Systemd,
     beats,
@@ -51,10 +52,16 @@ class LiveSystemd(Runner):
 
     def __call__(self, argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         if list(argv[:3]) == ["systemctl", "--user", "enable"]:
-            unit = argv[-1]
-            self.systemd.units[unit] = unit_show(
-                args=f"printer {unit.split('-')[2].split('@')[0]} p1"
+            for kind in ("watch", "vision"):
+                self.systemd.units[f"3d-printer-{kind}@p1.service"] = unit_show(
+                    "inactive", sub="dead", enabled="static", args=f"printer {kind} p1"
+                )
+            # real systemd: the timer is armed now, the check service still carries its last finish from before
+            self.systemd.units[argv[-1]] = unit_show(sub="waiting", active_mono=MONO)
+            self.systemd.units["3d-printer-ondemand@p1.service"] = unit_show(
+                "inactive", sub="dead", enabled="static", inactive_mono=MONO - 3600
             )
+            self.systemd.last_checks["p1"] = {"printer": "idle", "phase": "idle"}
         return super().__call__(argv)
 
 
@@ -77,6 +84,8 @@ def check(
             unit_dir=tmp_path / "units",
             runner=runner or Runner(),
             alive=lambda _p: True,
+            last_check=getattr(systemd, "last_check", None),
+            monotonic=lambda: MONO,
         ),
         adapter=lambda _d: StubAdapter(state),
     )
@@ -208,9 +217,52 @@ def test_the_fix_with_yes_installs_the_units_and_the_check_passes_afterwards(
         "--user",
         "enable",
         "--now",
-        "3d-printer-vision@p1.service",
+        "3d-printer-ondemand@p1.timer",
     ] in live.calls
+    assert not any("3d-printer-vision@p1" in " ".join(c) for c in live.calls)
     assert not any(c[0] == "tg" for c in live.calls)  # the fix never messages anyone
+
+
+def test_the_fix_for_one_printer_also_migrates_the_legacy_peers_that_share_the_template(
+    tmp_path: Path,
+) -> None:
+    """The doctor narrows the environment to one printer; the supervisor service template is shared, so a peer
+    that still runs the resident process of the first design must be migrated with it."""
+    from printer_ops.supervise_units import PrinterPlan
+
+    old = Systemd(
+        {
+            "3d-printer-ondemand@p2.service": unit_show(
+                enabled="enabled", args="-m printer_ops.ondemand p2"
+            ),
+            "3d-printer-watch@p2.service": unit_show(
+                "inactive", sub="dead", enabled="static", args="printer watch p2"
+            ),
+        }
+    )
+    runner = Runner(linger=True)
+    r = rig(
+        target(watch=CAMERA),
+        systemctl_show=old,
+        agents=agent_sources(tmp_path / "state"),
+        supervision=SupervisionSources(
+            linger=lambda: True,
+            unit_dir=tmp_path / "units",
+            runner=runner,
+            alive=lambda _p: True,
+            last_check=old.last_check,
+            monotonic=lambda: MONO,
+            fleet=lambda: [
+                PrinterPlan("p1", "moonraker", True),
+                PrinterPlan("p2", "moonraker", False),
+            ],
+        ),
+        adapter=lambda _d: StubAdapter("idle"),
+    )
+    run_printer(r.ctx, [CHECK], Options(fix=True, yes=True))
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl"]
+    assert ["disable", "--now", "3d-printer-ondemand@p2.service"] in systemctl
+    assert ["enable", "--now", "3d-printer-ondemand@p2.timer"] in systemctl
 
 
 def test_the_check_never_contacts_the_printer_with_anything_but_a_status_read(
@@ -233,6 +285,8 @@ def test_the_check_never_contacts_the_printer_with_anything_but_a_status_read(
             unit_dir=tmp_path / "units",
             runner=Runner(),
             alive=lambda _p: True,
+            last_check=healthy().last_check,
+            monotonic=lambda: MONO,
         ),
         adapter=lambda _d: Spy("printing"),
     )

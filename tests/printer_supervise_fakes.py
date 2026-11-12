@@ -15,10 +15,13 @@ from printer_ops import supervise_units as su
 from printer_ops.subscriptions import DeliveryState
 
 NOW = 1_800_000_000.0  # the doctor rig's ManualClock starts here too
-LAYOUT = su.Layout(Path("/srv/3d-cli"), Path("/srv/3d-cli/.venv/bin/python"), Path("/unused"), None)
-CAMERA = {"vision": {"camera": {"kind": "snapshot-url", "url": "http://127.0.0.1:1/snap"}}}
-
-
+MONO = 5_000.0  # CLOCK_MONOTONIC "now" of the fake systemd: its timestamps are seconds since boot
+LAYOUT = su.Layout(
+    Path("/srv/3d-cli"), Path("/srv/3d-cli/.venv/bin/python"), Path("/unused"), None
+)
+CAMERA = {
+    "vision": {"camera": {"kind": "snapshot-url", "url": "http://127.0.0.1:1/snap"}}
+}
 
 
 def unit_show(
@@ -29,35 +32,97 @@ def unit_show(
     sub: str = "running",
     restarts: int = 0,
     load: str = "loaded",
+    inactive_mono: float | None = None,
+    active_mono: float | None = None,
 ) -> str:
+    """`systemctl --user show` of one unit. `inactive_mono`: CLOCK_MONOTONIC seconds it last became inactive (the
+    one-shot check service: when the last check finished)."""
+    inactive = (
+        f"InactiveEnterTimestampMonotonic={int(inactive_mono * 1e6)}\n"
+        if inactive_mono is not None
+        else ""
+    )
+    armed = (
+        f"ActiveEnterTimestampMonotonic={int(active_mono * 1e6)}\n"
+        if active_mono is not None
+        else ""
+    )
     return (
-        f"LoadState={load}\nActiveState={active}\nSubState={sub}\nUnitFileState={enabled}\nNRestarts={restarts}\n"
-        f"ExecStart={{ path=/usr/bin/3d ; argv[]=/usr/bin/3d {args} ; ignore_errors=no ; pid=0 }}\n"
-        "EnvironmentFiles=\n"
+        inactive
+        + armed
+        + (
+            f"LoadState={load}\nActiveState={active}\nSubState={sub}\nUnitFileState={enabled}\nNRestarts={restarts}\n"
+            f"ExecStart={{ path=/usr/bin/3d ; argv[]=/usr/bin/3d {args} ; ignore_errors=no ; pid=0 }}\n"
+            "EnvironmentFiles=\n"
+        )
     )
 
 
 class Systemd:
-    """A fake `systemctl --user show`: unit name -> text; anything else is not installed."""
+    """A fake `systemctl --user show`: unit name -> text; anything else is not installed. `last_checks` is what
+    each printer's one-shot check left in its state file (`ondemand.read_status`): name -> {printer, phase}."""
 
-    def __init__(self, units: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        units: dict[str, str] | None = None,
+        last_checks: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.units = units or {}
+        self.last_checks = last_checks or {}
 
     def __call__(self, unit: str) -> str:
         return self.units.get(unit, "LoadState=not-found\nActiveState=inactive\n")
 
+    def last_check(self, name: str) -> dict[str, Any]:
+        return self.last_checks.get(name, {})
 
-def healthy(name: str = "p1", camera: bool = True, **over: Any) -> Systemd:
-    units = {
-        f"3d-printer-watch@{name}.service": unit_show(
-            args=f"printer watch {name}", **over
-        ),
-    }
-    if camera:
-        units[f"3d-printer-vision@{name}.service"] = unit_show(
-            args=f"printer vision {name}", **over
+
+def parse_status(text: str) -> tuple[dict[str, str], float | None]:
+    """`printer=idle phase=idle polled=<epoch>` -> (the check's state-file view, the timer's last trigger)."""
+    fields = dict(w.split("=", 1) for w in text.split() if "=" in w)
+    polled = fields.pop("polled", "")
+    return fields, float(polled) if polled.isdigit() else None
+
+
+def healthy(
+    name: str = "p1",
+    camera: bool = True,
+    *,
+    status_text: str = "",
+    supervisor: bool = True,
+    **over: Any,
+) -> Systemd:
+    """A supervisor timer that is armed (enabled) and workers that run too (not enabled: the check starts them,
+    `enabled` in `over` overrides both). `status_text` (`printer=idle phase=idle polled=<epoch>`) is what the
+    supervisor's last check saw: the state file view plus when the timer last fired."""
+    units: dict[str, str] = {}
+    last_checks: dict[str, dict[str, Any]] = {}
+    if supervisor:
+        seen, polled = parse_status(status_text)
+        if seen:
+            last_checks[name] = seen
+        units[f"3d-printer-ondemand@{name}.timer"] = unit_show(
+            **{
+                "active": "active",
+                "sub": "waiting",
+                "enabled": "enabled",
+                "args": "",
+                **over,
+            }
         )
-    return Systemd(units)
+        units[f"3d-printer-ondemand@{name}.service"] = unit_show(
+            active="inactive",
+            sub="dead",
+            enabled="static",
+            args="",
+            inactive_mono=None if polled is None else MONO - (NOW - polled),
+        )
+    kinds = ("watch", "vision") if camera else ("watch",)
+    for kind in kinds:
+        units[f"3d-printer-{kind}@{name}.service"] = unit_show(
+            **{"enabled": "static", "args": f"printer {kind} {name}", **over}
+        )
+    return Systemd(units, last_checks)
 
 
 class Runner:
@@ -156,6 +221,8 @@ def env_for(
         alive=lambda _pid: True,
         plans=lambda: plans if plans is not None else [plan()],
         ledger=DeliveryState(tmp_path / "ledger.json"),
+        last_check=systemd.last_check,
+        monotonic=lambda: MONO,
     )
 
 

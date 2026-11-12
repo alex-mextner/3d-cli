@@ -30,7 +30,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from printer_doctor.journal import JournalEntry
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from printer_ops.webui import WebUiProbe
     from printer_doctor.targets import Target
     from printer_ops.printer_agent import PrinterAgents
+    from printer_ops.supervise_units import PrinterPlan
     from printer_ops.subscriptions import DeliveryState, Health, OmpLive, Registry
     from printer_ops.watch_sinks import Runner
     from printops.client import ApiClient
@@ -195,13 +196,16 @@ class AgentSources:
 @dataclass
 class SupervisionSources:
     """Where the always-on-supervision data comes from (`printer-supervision` check); None = the real thing.
-    Tests inject `linger`, a temp `unit_dir`, a fake systemctl/loginctl `runner` and a pid probe."""
+    Tests inject `linger`, a temp `unit_dir`, a fake systemctl/loginctl `runner`, a pid probe and `last_check`
+    (what the printer's one-shot on-demand check left in its runtime state file)."""
 
     linger: Callable[[], bool | None] | None = None
     unit_dir: Path | None = None
     runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None
     alive: Callable[[int], bool] | None = None
-
+    last_check: Callable[[str], Mapping[str, Any]] | None = None
+    monotonic: Callable[[], float] | None = None
+    fleet: Callable[[], list[PrinterPlan]] | None = None  # every supervised printer, not just this one
 
 
 @dataclass

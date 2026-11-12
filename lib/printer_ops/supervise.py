@@ -1,22 +1,34 @@
 """supervise.py — `3d printer supervise`: install, check and repair the always-on printer supervision.
 
-WHAT: one `3d-printer-watch@NAME` unit (Klipper/Moonraker state, errors, pauses, print start) and, with a
-  camera, one `3d-printer-vision@NAME` unit (frames: spaghetti, detached part) per OWNED, fully controlled
-  fleet printer, shipped from this repo (supervise_units.py) and judged here from three independent
-  witnesses: systemd (is it running, enabled, started with --dry-run?), the units' own heartbeat files
-  (watch/NAME.json every 15 s, vision/NAME.json every cycle) and the printer itself (printing? answering?).
+WHAT: one `3d-printer-ondemand@NAME` TIMER (no resident process, #747) per OWNED, fully controlled fleet printer
+  and the WORKERS its one-shot check starts only while a print runs: `3d-printer-watch@NAME` (Klipper/Moonraker
+  state, errors, pauses, print start) and, with a camera, `3d-printer-vision@NAME` (frames: spaghetti, detached
+  part), all shipped from this repo (supervise_units.py) and judged here from three independent witnesses:
+  systemd (is the timer armed and when did it fire last, the workers running, started with --dry-run?; plus what
+  the last check saw, from ondemand.read_status), the workers' own heartbeat files (watch/NAME.json
+  every 15 s, vision/NAME.json every cycle) and the printer itself (printing? answering?).
   `status` prints the verdict and fails (exit 1) when a printer that answers is not supervised;
   `install`/`uninstall` change the units; `quiet` writes the intentional-off marker; `notify-failure` is the
-  ExecStopPost hook of the units (one short tg line when a supervisor dies during a print).
+  ExecStopPost hook of the workers (one short tg line when a worker dies during a print).
 
 WHY (#639 #640 #641 #642): the owner's requirement is that AI supervision ALWAYS works while a print runs, also
   when the printer is switched off between prints, and catches a print started from anywhere, with or
-  without Home Assistant. That needs units that are always up (no gate on a marker), a way to prove they are,
-  and a signal when they stop.
+  without Home Assistant. That needs a unit that is always up (no gate on a marker), a way to prove it is,
+  and a signal when it stops.
+WHY ON DEMAND (#747): nothing may cost memory, CPU or disk while no print runs, so the heavy workers exist only
+  while a print does. Judging "supervised" therefore depends on the printer: an idle or switched-off printer
+  needs its timer armed and nothing else; a printing one needs the workers running with fresh
+  heartbeats (FAIL if not), apart from the one check interval right after a print started.
 
-WHAT RUNS ALWAYS (the supervision path, no Home Assistant, no omp session, no printer power state assumed):
-  3d-printer-watch@NAME  - websocket to the printer (Moonraker / creality-stock ws:9999), retries every <= 30 s
-                           while the printer is off, emits `print_started` for a print started by ANY route
+WHAT IS ARMED ALWAYS (the supervision path, no Home Assistant, no omp session, no printer power state assumed):
+  3d-printer-ondemand@NAME.timer - systemd holds it; every 30 s it runs the one-shot `3d-printer-ondemand@NAME`
+                           service (printer_ops/ondemand.py: ~20 ms, ONE small request to the printer, backoff
+                           while it is off), which starts the workers when a print is printing or paused,
+                           however it was started, and stops them after a grace period. No process lives
+                           between two checks; what the last check saw is in a RAM state file.
+WHAT RUNS WHILE A PRINT RUNS:
+  3d-printer-watch@NAME  - websocket to the printer (Moonraker / creality-stock ws:9999), emits `print_started`
+                           for a print started by ANY route
   3d-printer-vision@NAME - polls the printer's state, fetches camera frames only while it prints, resets the
                            per-print baselines at each print start, hands findings to the alert chain
   alert chain            - live omp subscriber -> temporary omp agent -> tg fallback -> autonomous pause
@@ -33,14 +45,18 @@ import json
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from printer_ops import ondemand
 from printer_ops.supervise_units import (
+    CHECK,
     KINDS,
     RUNNING,
+    SUPERVISOR,
     Action,
+    ApplyReport,
     DropIn,
     Layout,
     PrinterPlan,
@@ -74,6 +90,10 @@ NOTIFY_EVERY_S = (
     1800.0  # one tg line per unit per failure episode (a crash loop must not repeat it)
 )
 ACTIVE = frozenset({"printing", "paused", "busy"})
+CHECK_STALE_S = 600.0  # a check that finished longer ago than this is not running (the timer fires every 30 s)
+ONDEMAND_START_LAG_S = (
+    45.0  # one supervisor poll (30 s) plus the time to start a worker
+)
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 _RANK = {OK: 0, WARN: 1, FAIL: 2}
@@ -83,23 +103,27 @@ USAGE = """3d printer supervise status [NAME...|--all] [--json] [--no-live] [--u
 3d printer supervise uninstall [NAME...|--all] [--yes] [--unit-dir DIR]
 3d printer supervise quiet NAME [--reason TEXT] | --clear
 
-The always-on AI supervision of the owned printers: one `3d-printer-watch@NAME` unit (printer state, errors,
-pauses, print start) and, with a camera, one `3d-printer-vision@NAME` unit (spaghetti, detached part), generated
-from the fleet registry (owner own, access full). They run without a login (linger), restart forever, never
-use --dry-run, need no Home Assistant and no omp session, and wait for a printer that is switched off.
+The AI supervision of the owned printers: a `3d-printer-ondemand@NAME.timer` that runs a ~20 ms one-shot check
+every 30 s (no process lives between checks), which starts one `3d-printer-watch@NAME` unit (printer state,
+errors, pauses, print start) and, with a camera, one `3d-printer-vision@NAME` unit (spaghetti, detached part)
+only while a print runs and stops them after it, generated from the fleet registry (owner own, access full).
+The timer runs without a login (linger) and after a reboot, nothing uses --dry-run, no Home Assistant and no
+omp session is needed, and a printer that is switched off is waited for with backoff.
 
   status      per printer: unit active/enabled, heartbeat age, printer state, camera frame age, linger, the
-              intentional-off marker. Exit 1 (FAIL) when a printer that is printing or answering has no live
-              unit or a stale heartbeat, or when linger is off. Reads the printer (one status GET) unless
-              --no-live.
-  install     writes the unit templates, `daemon-reload`, `enable --now` per printer, `enable-linger` (--yes).
+              intentional-off marker. Exit 1 (FAIL) when the supervisor is down, or a printing printer has no
+              live worker or a stale heartbeat, or when linger is off. Workers that are stopped while the
+              printer is idle are fine. Reads the printer (one status GET) unless --no-live.
+  install     writes the unit templates, `daemon-reload`, `enable --now` the timer per printer (the workers
+              are never enabled: an older always-on install has them disabled; the long-lived supervisor
+              process of the first #747 design is disabled), `enable-linger` (--yes).
               A hand-made template or a drop-in gate (`intentional-off.conf`) is replaced/retired only with
               --yes (a `.bak-<time>` / `.retired-<time>` copy stays); without --yes the plan is printed and
               nothing is changed. --plan only prints.
-  uninstall   disables the printers' units; with --all --yes also removes the managed templates.
+  uninstall   disables the timers and stops the workers; with --all --yes also removes the managed templates.
   quiet       write (or --clear) NAME's intentional-off marker: ONLY silences the "printer unreachable"
               alarms; it never stops a unit and is cleared when the printer answers.
-  notify-failure NAME KIND   ExecStopPost hook of the units (KIND watch|vision); not for humans.
+  notify-failure NAME KIND   ExecStopPost hook of the workers (KIND watch|vision); not for humans.
 
   3d printer supervise status
   3d printer supervise install --all --plan
@@ -123,6 +147,15 @@ class UnitState:
     dry_run: bool = False
     restarts: int | None = None
     since: str = ""
+    status_text: str = (
+        ""  # the supervisor's last check: `printer=idle phase=idle polled=<epoch>`
+    )
+    inactive_mono: float | None = (
+        None  # CLOCK_MONOTONIC seconds the unit last became inactive or failed
+    )
+    active_mono: float | None = (
+        None  # CLOCK_MONOTONIC seconds the unit last became active (a timer: when it was armed)
+    )
 
     @property
     def running(self) -> bool:
@@ -138,6 +171,8 @@ def probe_unit(unit: str, show: Show) -> UnitState:
     verdict = check_unit(unit, lambda _u: text)
     f = _fields(text)
     restarts = f.get("NRestarts", "")
+    inactive = f.get("InactiveEnterTimestampMonotonic", "")
+    active = f.get("ActiveEnterTimestampMonotonic", "")
     return UnitState(
         unit,
         True,
@@ -148,7 +183,74 @@ def probe_unit(unit: str, show: Show) -> UnitState:
         verdict.dry_run,
         int(restarts) if restarts.isdigit() else None,
         f.get("ActiveEnterTimestamp", ""),
+        f.get("StatusText", ""),
+        int(inactive) / 1e6 if inactive.isdigit() and int(inactive) else None,
+        int(active) / 1e6 if active.isdigit() and int(active) else None,
     )
+
+
+def _check_words(
+    check: UnitState, timer: UnitState, doc: Mapping[str, Any], now: float, mono: float
+) -> list[str]:
+    """The status words of the check service: how its last run ended and what that run saw."""
+    if check.known and check.active == "failed":
+        return ["check=failed"]
+    if check.known and check.load == "not-found":
+        return ["check=missing"]
+    armed_since = timer.active_mono
+    if check.inactive_mono is not None and not (
+        armed_since is not None and armed_since > check.inactive_mono
+    ):
+        # a check that backs off exits 0 without asking: the observation is as old as the probe that set the
+        # backoff, not as the check that skipped it
+        probed = doc.get("last_probe_mono")
+        asked_mono = (
+            min(check.inactive_mono, float(probed))
+            if isinstance(probed, (int, float)) and not isinstance(probed, bool)
+            else check.inactive_mono
+        )
+        return [
+            f"printer={doc.get('printer') or 'unknown'}",
+            f"phase={doc.get('phase') or 'idle'}",
+            f"polled={int(now - (mono - asked_mono))}",
+        ]
+    # no check has finished since the timer was (re)armed: an older finish says nothing about the timer
+    if timer.active_mono is not None and mono - timer.active_mono > CHECK_STALE_S:
+        return [
+            "check=never"
+        ]  # armed for a while, yet no check ever completed (every one skipped)
+    if timer.active_mono is not None:
+        # armed a moment ago, its first check (5 s after arming) has not finished: the arming time is the
+        # "last poll", so a printing printer gets the start-lag WARN right after an install, not a FAIL
+        return [f"phase=idle polled={int(now - (mono - timer.active_mono))}"]
+    return []
+
+
+def probe_supervisor(
+    name: str,
+    show: Show,
+    last_check: Callable[[str], Mapping[str, Any]],
+    now: float,
+    mono: float,
+) -> UnitState:
+    """The supervisor TIMER of `name`, with what its last one-shot check saw (`ondemand.read_status`: the state
+    file in the runtime directory) and when that check last finished, as the `status_text` the judging code
+    reads: `printer=idle phase=idle polled=<epoch>`. `now` is the wall clock and `mono` CLOCK_MONOTONIC (what
+    systemd stamps with): the timer's own trigger would also tick while the check crashes, so the time comes from
+    the check SERVICE. A failed last run says only `check=failed` (the state file is then not to be trusted); an
+    unreadable configuration adds `config=unreadable` (`config=kept` while the last good one is still used,
+    `config=refused` when its configuration says 3d does not supervise the printer)."""
+    timer = probe_unit(unit_name(SUPERVISOR, name), show)
+    if not timer.known:
+        return timer
+    check = probe_unit(unit_name(CHECK, name), show)
+    doc = last_check(name)
+    words = _check_words(check, timer, doc, now, mono)
+    if doc.get("config_error"):
+        # an edit that does not parse leaves the cached configuration in use: workers still start
+        kind = "kept" if doc.get("config_kept") else ("refused" if doc.get("refused") else "unreadable")
+        words.append(f"config={kind}")
+    return replace(timer, status_text=" ".join(words)) if words else timer
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
@@ -334,6 +436,361 @@ def _age(seconds: float | None) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
+_INSTALL_FIX = "3d printer supervise install --all --yes"
+
+
+def _status_fields(text: str) -> dict[str, str]:
+    """The `key=value` words of the supervisor's StatusText (`printer=printing phase=active polled=1700000000`)."""
+    return dict(w.split("=", 1) for w in text.split() if "=" in w)
+
+
+def _supervisor_poll_age(u: UnitState | None, now: float) -> float | None:
+    """Seconds since the supervisor's last poll, None when it has not said."""
+    polled = _status_fields(u.status_text).get("polled", "") if u is not None else ""
+    return now - int(polled) if polled.isdigit() else None
+
+
+def supervisor_state(u: UnitState | None, now: float) -> str | None:
+    """The printer state the supervisor saw at its last poll (normalized: printing | idle), None when it has
+    not polled lately or could not reach the printer. Stands in for a live read under `--no-live`."""
+    age = _supervisor_poll_age(u, now)
+    if u is None or not u.running or age is None or age > 4 * ONDEMAND_START_LAG_S:
+        return None
+    return {"printing": "printing", "idle": "idle"}.get(
+        _status_fields(u.status_text).get("printer", "")
+    )
+
+
+def _linger_findings(add: Callable[[Finding], None], linger: bool | None) -> None:
+    if linger is False:
+        add(
+            Finding(
+                FAIL,
+                "linger is off: the units stop when you log out and do not start after a reboot",
+                "3d printer supervise install --all --yes   # runs `loginctl enable-linger`",
+            )
+        )
+    elif linger is None:
+        add(Finding(WARN, "cannot tell whether linger is on (loginctl did not answer)"))
+
+
+def _running_unit_findings(
+    add: Callable[[Finding], None], label: str, u: UnitState, *, boot: bool = True
+) -> None:
+    """Findings for a unit that runs: --dry-run, not enabled (`boot`: only for a unit that must start at boot,
+    which a worker does not: the supervisor starts it), restart storm."""
+    if u.dry_run:
+        add(
+            Finding(
+                FAIL,
+                f"{label} {u.unit} runs with --dry-run: alerts are printed, never delivered",
+                _INSTALL_FIX,
+            )
+        )
+    if boot and not u.enabled:
+        add(
+            Finding(
+                WARN,
+                f"{label} {u.unit} runs but is not enabled: it will not start after a reboot",
+                f"systemctl --user enable {u.unit}",
+            )
+        )
+    if u.restarts is not None and u.restarts >= 5:
+        add(
+            Finding(
+                WARN,
+                f"{label} {u.unit} restarted {u.restarts} times since it started"
+                " (journalctl --user -u " + u.unit + ")",
+            )
+        )
+
+
+def _unit_findings(
+    add: Callable[[Finding], None],
+    kind: str,
+    u: UnitState | None,
+    need: str,
+    dropins: Sequence[DropIn],
+    *,
+    boot: bool = True,
+) -> None:
+    label = f"{kind} unit"
+    if u is None or not u.known:
+        add(
+            Finding(
+                FAIL,
+                f"{label}: systemctl --user cannot be read here: run this on the host of the services",
+            )
+        )
+    elif u.load == "not-found":
+        add(Finding(need, f"{label} {u.unit} is not installed", _INSTALL_FIX))
+    elif not u.running:
+        held = [
+            d
+            for d in dropins
+            if d.retirable and d.path.parent.name.startswith(f"3d-printer-{kind}@")
+        ]
+        why = (
+            " (held by an intentional-off ConditionPathExists drop-in)" if held else ""
+        )
+        add(
+            Finding(
+                need,
+                f"{label} {u.unit} is {u.active or 'not running'}{why}",
+                _INSTALL_FIX,
+            )
+        )
+    else:
+        _running_unit_findings(add, label, u, boot=boot)
+
+
+def _worker_findings(
+    add: Callable[[Finding], None],
+    kind: str,
+    u: UnitState | None,
+    *,
+    busy: bool,
+    need: str,
+    dropins: Sequence[DropIn],
+    supervisor: UnitState | None,
+    now: float,
+) -> None:
+    """A worker unit exists only while a print runs: stopped is the RIGHT state for an idle or switched-off
+    printer. While a print runs it must be running; right after the print started the supervisor still has up
+    to one poll interval to start it (a WARN, not a FAIL, so a status run at that moment does not cry wolf)."""
+    if u is not None and u.known and u.load != "not-found" and not u.running:
+        if not busy:
+            return
+        fields = (
+            _status_fields(supervisor.status_text) if supervisor is not None else {}
+        )
+        age = _supervisor_poll_age(supervisor, now)
+        if (
+            fields.get("phase") != "active"
+            and age is not None
+            and age <= ONDEMAND_START_LAG_S
+        ):
+            add(
+                Finding(
+                    WARN,
+                    f"{kind} unit {u.unit} is not running yet: the print started within the last poll, "
+                    "the supervisor starts it at its next poll (re-run status in a minute)",
+                )
+            )
+            return
+    _unit_findings(add, kind, u, need, dropins, boot=False)
+
+
+def _disconnected_finding(
+    add: Callable[[Finding], None],
+    name: str,
+    unit: UnitState,
+    watch: Beat,
+    state: str | None,
+    now: float,
+) -> None:
+    p = (watch.doc.get("printers") or {}).get(name) or {}
+    since = p.get("unreachable_since")
+    if (
+        state is not None
+        and p.get("connected") is False
+        and isinstance(since, (int, float))
+        and now - since > UNREACHABLE_GRACE_S
+    ):
+        add(
+            Finding(
+                FAIL,
+                f"the printer answers but the watcher has been disconnected for "
+                f"{_age(now - since)} ({p.get('last_error') or 'no reason recorded'})",
+                f"systemctl --user restart {unit.unit}",
+            )
+        )
+
+
+def _watch_findings(
+    add: Callable[[Finding], None],
+    name: str,
+    unit: UnitState,
+    watch: Beat | None,
+    need: str,
+    state: str | None,
+    now: float,
+) -> None:
+    """Heartbeat checks of a RUNNING watcher unit."""
+    if watch is None:
+        add(
+            Finding(
+                need,
+                "the watcher has never written a heartbeat (watch/NAME.json)",
+                f"journalctl --user -u {unit.unit} -n 50",
+            )
+        )
+    elif watch.age_s > WATCH_BEAT_STALE_S:
+        add(
+            Finding(
+                need,
+                f"the watcher heartbeat is {_age(watch.age_s)} old: the process is alive but wedged",
+                f"systemctl --user restart {unit.unit}",
+            )
+        )
+    else:
+        _disconnected_finding(add, name, unit, watch, state, now)
+
+
+def _vision_findings(
+    add: Callable[[Finding], None],
+    unit: UnitState,
+    vision: Beat | None,
+    need: str,
+    now: float,
+) -> None:
+    """Status-file checks of a RUNNING vision unit."""
+    if vision is None:
+        add(
+            Finding(
+                need,
+                "the vision loop has never written its status (vision/NAME.json)",
+                f"journalctl --user -u {unit.unit} -n 50",
+            )
+        )
+        return
+    interval = vision.doc.get("interval_s")
+    limit = (
+        max(VISION_STALE_MIN_S, 4 * float(interval))
+        if isinstance(interval, (int, float))
+        else 120.0
+    )
+    if vision.age_s > limit:
+        add(
+            Finding(
+                need,
+                f"the vision status is {_age(vision.age_s)} old: the loop is alive but wedged",
+                f"systemctl --user restart {unit.unit}",
+            )
+        )
+    elif vision.doc.get("supervising") is True:
+        frame_age = _stamp_age(vision.doc, "last_frame_ts", now)
+        if frame_age is None or frame_age > FRAME_STALE_S:
+            add(
+                Finding(
+                    FAIL,
+                    f"the printer prints and the camera gave no frame for {_age(frame_age)}",
+                    "3d printer vision doctor; 3d printers doctor --check camera-config",
+                )
+            )
+
+
+def _duplicate_findings(
+    add: Callable[[Finding], None], duplicates: Sequence[str]
+) -> None:
+    if duplicates:
+        add(
+            Finding(
+                FAIL,
+                "another watcher covers this printer too: "
+                + ", ".join(duplicates)
+                + " (one watcher per printer: two would double every alert and race the pause)",
+                "stop the extra process; the unit is the one watcher",
+            )
+        )
+
+
+def _dropin_findings(add: Callable[[Finding], None], dropins: Sequence[DropIn]) -> None:
+    for d in dropins:
+        if d.kind == "gate":
+            add(
+                Finding(
+                    WARN,
+                    f"obsolete drop-in {d.path}: " + d.detail,
+                    "3d printer supervise install --all --yes   # retires it, keeps a copy",
+                )
+            )
+        elif d.kind == "dry-run":
+            add(
+                Finding(
+                    FAIL,
+                    f"drop-in {d.path}: {d.detail}",
+                    f"edit it: remove --dry-run, then {_INSTALL_FIX}",
+                )
+            )
+
+
+def _check_findings(
+    add: Callable[[Finding], None],
+    name: str,
+    supervisor: UnitState | None,
+    need: str,
+    now: float,
+) -> None:
+    """What the one-shot check's last run says: it crashed, or it cannot read the printer configuration (either
+    way nothing can start or stop the workers)."""
+    if supervisor is None:
+        return
+    fields = _status_fields(supervisor.status_text)
+    fix = f"journalctl --user -u 3d-printer-ondemand@{name}.service -n 20"
+    polled = fields.get("polled", "")
+    if polled.isdigit() and now - int(polled) > CHECK_STALE_S:
+        add(
+            Finding(
+                need,
+                f"the last on-demand check finished {_age(now - int(polled))} ago: the timer fires but no check completes "
+                "(a missing checkout skips it, or it hangs)",
+                fix,
+            )
+        )
+    if fields.get("check") == "never":
+        add(
+            Finding(
+                need,
+                "no on-demand check has completed since the timer was armed (every tick is skipped: is the "
+                "checkout missing?)",
+                fix,
+            )
+        )
+    if fields.get("check") == "missing":
+        add(
+            Finding(
+                need,
+                f"the check service 3d-printer-ondemand@{name}.service is not installed: the timer has nothing to run",
+                _INSTALL_FIX,
+            )
+        )
+    if fields.get("check") == "failed":
+        add(
+            Finding(
+                need,
+                "the last on-demand check failed: nothing starts or stops the workers",
+                fix,
+            )
+        )
+    if fields.get("config") == "kept":
+        add(
+            Finding(
+                WARN,
+                "the on-demand check cannot read the edited printer configuration: it keeps using the last good one "
+                "and retries every 2 minutes",
+                fix,
+            )
+        )
+    if fields.get("config") == "refused":
+        add(
+            Finding(
+                need,
+                "the on-demand check's configuration does not supervise this printer (the unit sees another fleet, "
+                "config directory or checkout than your shell): it starts no workers",
+                fix,
+            )
+        )
+    if fields.get("config") == "unreadable":
+        add(
+            Finding(
+                need,
+                "the on-demand check cannot read the printer configuration: it cannot start the workers",
+                fix,
+            )
+        )
+
+
 def assess(
     plan: PrinterPlan,
     *,
@@ -367,176 +824,30 @@ def assess(
     )
     need = FAIL if state is not None else WARN
     add = a.findings.append
-    install = "3d printer supervise install --all --yes"
 
-    if linger is False:
-        add(
-            Finding(
-                FAIL,
-                "linger is off: the units stop when you log out and do not start after a reboot",
-                "3d printer supervise install --all --yes   # runs `loginctl enable-linger`",
-            )
-        )
-    elif linger is None:
-        add(Finding(WARN, "cannot tell whether linger is on (loginctl did not answer)"))
-
+    _linger_findings(add, linger)
+    supervisor = units.get(SUPERVISOR)
+    _unit_findings(add, SUPERVISOR, supervisor, need, dropins)
+    _check_findings(add, plan.name, supervisor, need, now)
     for kind in plan.kinds:
-        u = units.get(kind)
-        label = f"{kind} unit"
-        if u is None or not u.known:
-            add(
-                Finding(
-                    FAIL,
-                    f"{label}: systemctl --user cannot be read here: run this on the host of the services",
-                )
-            )
-            continue
-        if u.load == "not-found":
-            add(Finding(need, f"{label} {u.unit} is not installed", install))
-            continue
-        if not u.running:
-            held = [
-                d
-                for d in dropins
-                if d.retirable and d.path.parent.name.startswith(f"3d-printer-{kind}@")
-            ]
-            why = (
-                " (held by an intentional-off ConditionPathExists drop-in)"
-                if held
-                else ""
-            )
-            add(
-                Finding(
-                    need,
-                    f"{label} {u.unit} is {u.active or 'not running'}{why}",
-                    install,
-                )
-            )
-            continue
-        if u.dry_run:
-            add(
-                Finding(
-                    FAIL,
-                    f"{label} {u.unit} runs with --dry-run: alerts are printed, never delivered",
-                    install,
-                )
-            )
-        if not u.enabled:
-            add(
-                Finding(
-                    WARN,
-                    f"{label} {u.unit} runs but is not enabled: it will not start after a reboot",
-                    f"systemctl --user enable {u.unit}",
-                )
-            )
-        if u.restarts is not None and u.restarts >= 5:
-            add(
-                Finding(
-                    WARN,
-                    f"{label} {u.unit} restarted {u.restarts} times since it started"
-                    " (journalctl --user -u " + u.unit + ")",
-                )
-            )
-
+        _worker_findings(
+            add,
+            kind,
+            units.get(kind),
+            busy=state in ACTIVE,
+            need=need,
+            dropins=dropins,
+            supervisor=supervisor,
+            now=now,
+        )
     watch_unit = units.get("watch")
     if watch_unit is not None and watch_unit.running:
-        if watch is None:
-            add(
-                Finding(
-                    need,
-                    "the watcher has never written a heartbeat (watch/NAME.json)",
-                    f"journalctl --user -u {watch_unit.unit} -n 50",
-                )
-            )
-        elif watch.age_s > WATCH_BEAT_STALE_S:
-            add(
-                Finding(
-                    need,
-                    f"the watcher heartbeat is {_age(watch.age_s)} old: the process is alive but wedged",
-                    f"systemctl --user restart {watch_unit.unit}",
-                )
-            )
-        else:
-            p = (watch.doc.get("printers") or {}).get(plan.name) or {}
-            since = p.get("unreachable_since")
-            if (
-                state is not None
-                and p.get("connected") is False
-                and isinstance(since, (int, float))
-                and now - since > UNREACHABLE_GRACE_S
-            ):
-                add(
-                    Finding(
-                        FAIL,
-                        f"the printer answers but the watcher has been disconnected for "
-                        f"{_age(now - since)} ({p.get('last_error') or 'no reason recorded'})",
-                        f"systemctl --user restart {watch_unit.unit}",
-                    )
-                )
-
+        _watch_findings(add, plan.name, watch_unit, watch, need, state, now)
     vision_unit = units.get("vision")
     if vision_unit is not None and vision_unit.running:
-        if vision is None:
-            add(
-                Finding(
-                    need,
-                    "the vision loop has never written its status (vision/NAME.json)",
-                    f"journalctl --user -u {vision_unit.unit} -n 50",
-                )
-            )
-        else:
-            interval = vision.doc.get("interval_s")
-            limit = (
-                max(VISION_STALE_MIN_S, 4 * float(interval))
-                if isinstance(interval, (int, float))
-                else 120.0
-            )
-            if vision.age_s > limit:
-                add(
-                    Finding(
-                        need,
-                        f"the vision status is {_age(vision.age_s)} old: the loop is alive but wedged",
-                        f"systemctl --user restart {vision_unit.unit}",
-                    )
-                )
-            elif vision.doc.get("supervising") is True:
-                frame_age = _stamp_age(vision.doc, "last_frame_ts", now)
-                if frame_age is None or frame_age > FRAME_STALE_S:
-                    add(
-                        Finding(
-                            FAIL,
-                            f"the printer prints and the camera gave no frame for {_age(frame_age)}",
-                            "3d printer vision doctor; 3d printers doctor --check camera-config",
-                        )
-                    )
-
-    if duplicates:
-        add(
-            Finding(
-                FAIL,
-                "another watcher covers this printer too: "
-                + ", ".join(duplicates)
-                + " (one watcher per printer: two would double every alert and race the pause)",
-                "stop the extra process; the unit is the one watcher",
-            )
-        )
-    for d in dropins:
-        if d.kind == "gate":
-            add(
-                Finding(
-                    WARN,
-                    f"obsolete drop-in {d.path}: " + d.detail,
-                    "3d printer supervise install --all --yes   # retires it, keeps a copy",
-                )
-            )
-        elif d.kind == "dry-run":
-            add(
-                Finding(
-                    FAIL,
-                    f"drop-in {d.path}: {d.detail}",
-                    f"edit it: remove --dry-run, then {install}",
-                )
-            )
+        _vision_findings(add, vision_unit, vision, need, now)
+    _duplicate_findings(add, duplicates)
+    _dropin_findings(add, dropins)
 
     if marker is not None:
         add(
@@ -550,7 +861,7 @@ def assess(
         add(
             Finding(
                 OK,
-                "printer is not answering (switched off?): the units wait and supervise it as soon as it does",
+                "printer is not answering (switched off?): the supervisor waits and starts the workers as soon as it prints",
             )
         )
     if not a.findings:
@@ -558,40 +869,62 @@ def assess(
     return a
 
 
+def _worker_detail(a: Assessment, kind: str) -> str:
+    """What a running worker's heartbeat says: age, and for vision whether it supervises and its last frame."""
+    beat = a.watch if kind == "watch" else a.vision
+    extra = "" if beat is None else f", heartbeat {_age(beat.age_s)} ago"
+    if kind == "vision" and a.vision is not None:
+        frame = _stamp_age(a.vision.doc, "last_frame_ts", a.now)
+        extra += ", " + (
+            "supervising a print" if a.vision.doc.get("supervising") else "idle"
+        )
+        if frame is not None:
+            extra += f", last frame {_age(frame)} ago"
+    return extra
+
+
+def _unit_line(a: Assessment, kind: str, u: UnitState) -> str:
+    if not u.known:
+        return f"       {kind:8} {u.unit}: cannot be inspected"
+    flags = ("enabled" if u.enabled else "not enabled") + (
+        ", --dry-run" if u.dry_run else ""
+    )
+    head = f"       {kind:8} {u.unit}: {u.active or '?'}/{u.sub or '?'} ({flags})"
+    if kind == SUPERVISOR:
+        return head + (f", {u.status_text}" if u.status_text else "")
+    if not u.running:
+        return head + ", on demand: starts with a print"
+    return head + _worker_detail(a, kind)
+
+
+def _finding_lines(f: Finding) -> list[str]:
+    mark = {OK: "  ok", WARN: "warn", FAIL: "FAIL"}[f.level]
+    lines = [f"       {mark} {f.text}"]
+    if f.fix and f.level != OK:
+        lines.append(f"            $ {f.fix}")
+    return lines
+
+
+def _printer_block(a: Assessment) -> list[str]:
+    state = (
+        a.state
+        if a.state is not None
+        else ("unreachable" if a.live else "unknown (not asked)")
+    )
+    lines = [f"{a.level.upper():4} {a.printer}: printer {state}"]
+    lines.extend(_unit_line(a, kind, u) for kind, u in a.units.items())
+    lines.append(
+        f"       linger: {'yes' if a.linger else 'NO' if a.linger is False else 'unknown'}"
+    )
+    for f in a.findings:
+        lines.extend(_finding_lines(f))
+    return lines
+
+
 def render(assessments: Sequence[Assessment]) -> str:
     lines: list[str] = []
     for a in assessments:
-        state = (
-            a.state
-            if a.state is not None
-            else ("unreachable" if a.live else "unknown (not asked)")
-        )
-        lines.append(f"{a.level.upper():4} {a.printer}: printer {state}")
-        for kind, u in a.units.items():
-            if not u.known:
-                lines.append(f"       {kind:6} {u.unit}: cannot be inspected")
-                continue
-            beat = a.watch if kind == "watch" else a.vision
-            extra = "" if beat is None else f", heartbeat {_age(beat.age_s)} ago"
-            if kind == "vision" and a.vision is not None:
-                frame = _stamp_age(a.vision.doc, "last_frame_ts", a.now)
-                extra += ", " + ("supervising a print" if a.vision.doc.get("supervising") else "idle")
-                if frame is not None:
-                    extra += f", last frame {_age(frame)} ago"
-            flags = ("enabled" if u.enabled else "not enabled") + (
-                ", --dry-run" if u.dry_run else ""
-            )
-            lines.append(
-                f"       {kind:6} {u.unit}: {u.active or '?'}/{u.sub or '?'} ({flags}){extra}"
-            )
-        lines.append(
-            f"       linger: {'yes' if a.linger else 'NO' if a.linger is False else 'unknown'}"
-        )
-        for f in a.findings:
-            mark = {OK: "  ok", WARN: "warn", FAIL: "FAIL"}[f.level]
-            lines.append(f"       {mark} {f.text}")
-            if f.fix and f.level != OK:
-                lines.append(f"            $ {f.fix}")
+        lines.extend(_printer_block(a))
     return "\n".join(lines)
 
 
@@ -609,6 +942,11 @@ class Env:
     alive: Callable[[int], bool] = pid_alive
     plans: Callable[[], list[PrinterPlan]] | None = None
     ledger: DeliveryState | None = None
+    last_check: Callable[[str], Mapping[str, Any]] = ondemand.read_status
+    monotonic: Callable[[], float] = time.monotonic
+    fleet: Callable[[], list[PrinterPlan]] | None = (
+        None  # every supervised printer (default: `plans`)
+    )
 
     def runner(self) -> Runner:
         return self.run or real_runner
@@ -631,12 +969,18 @@ class Env:
         return self.unit_dir or default_unit_dir()
 
     def eligible(self) -> list[PrinterPlan]:
-        if self.plans is not None:
-            return self.plans()
-        from printer_ops.devices import load_devices
-        from printops.fleet import load_fleet
+        return self.plans() if self.plans is not None else discover_plans()
 
-        return plan_printers(load_fleet(), dict(load_devices()))
+    def fleet_plans(self) -> list[PrinterPlan]:
+        """Every supervised printer, also when `plans` is narrowed to one (the doctor repairs one printer)."""
+        return self.fleet() if self.fleet is not None else self.eligible()
+
+
+def discover_plans() -> list[PrinterPlan]:
+    from printer_ops.devices import load_devices
+    from printops.fleet import load_fleet
+
+    return plan_printers(load_fleet(), dict(load_devices()))
 
 
 def gather(
@@ -646,7 +990,12 @@ def gather(
 
     now = env.clock()
     show = env.shower()
-    units = {k: probe_unit(unit_name(k, plan.name), show) for k in plan.kinds}
+    units = {
+        SUPERVISOR: probe_supervisor(
+            plan.name, show, env.last_check, now, env.monotonic()
+        )
+    }
+    units.update({k: probe_unit(unit_name(k, plan.name), show) for k in plan.kinds})
     states = env.states()
     watch = watch_beat(plan.name, states, now)
     state: str | None = None
@@ -657,6 +1006,8 @@ def gather(
         mine = (watch.doc.get("printers") or {}).get(plan.name) or {}
         if mine.get("connected") is True and isinstance(mine.get("state"), str):
             state = mine["state"]
+    if state is None and not live:
+        state = supervisor_state(units.get(SUPERVISOR), now)
     return assess(
         plan,
         units=units,
@@ -731,7 +1082,10 @@ def cmd_status(argv: list[str], env: Env) -> int:
     from errors import GateFailure
 
     names, opts = _parse(
-        argv, {"--all", "--json", "--no-live"}, {"--unit-dir"}, "printer supervise status"
+        argv,
+        {"--all", "--json", "--no-live"},
+        {"--unit-dir"},
+        "printer supervise status",
     )
     if "--unit-dir" in opts:
         env.unit_dir = Path(opts["--unit-dir"]).expanduser()
@@ -756,19 +1110,111 @@ def cmd_status(argv: list[str], env: Env) -> int:
     return 0
 
 
+def _no_unit_file(u: UnitState) -> bool:
+    """systemd answered and has no unit file for it, and nothing of it runs. An unanswered `show` (no user bus) is
+    NOT this: its units are unknown and an uninstall must fail loudly, not report "nothing to do"."""
+    return u.known and u.load == "not-found" and not u.running
+
+
+def _enabled(plan: PrinterPlan, unit: str, u: UnitState) -> bool:
+    """A worker counts as enabled by its unit file alone (an older install left it enabled: that is what install
+    must disable); the timer supervisor must be enabled AND running (a stopped one is started)."""
+    return u.known and u.enabled and (u.running or unit != plan.supervisor_unit())
+
+
+def _resident_process(check: UnitState) -> bool:
+    """The first #747 design ran `3d-printer-ondemand@NAME.service` as a long-lived process: `active/running`, or
+    waiting to be restarted as `activating/auto-restart`. The new one-shot check shows `activating/start` while it
+    works, so a check in flight is never mistaken for it."""
+    return (
+        check.active == "active" and check.sub == "running"
+    ) or check.sub == "auto-restart"
+
+
+def _note_legacy(check: UnitState, absent: set[str], old: set[str]) -> None:
+    """The check service is the unit the first #747 design ran as a long-lived, enabled process: record it as
+    `old` (to retire) or `absent` (no unit file)."""
+    if _no_unit_file(check):
+        absent.add(check.unit)
+    if check.known and (check.enabled or _resident_process(check)):
+        old.add(check.unit)
+
+
 def _installed_state(
     plans: Sequence[PrinterPlan], env: Env
-) -> tuple[dict[str, bool], set[str]]:
+) -> tuple[dict[str, bool], set[str], set[str], set[str]]:
+    """(enabled, loaded_dry_run, old_supervisors, absent) of every unit of `plans`; `absent` are the units
+    systemd has no unit file for (an uninstall must not `stop`/`disable` them: systemctl fails with exit 5)."""
     show = env.shower()
     enabled: dict[str, bool] = {}
     dry: set[str] = set()
+    old: set[str] = set()
+    absent: set[str] = set()
     for p in plans:
         for unit in p.units():
             u = probe_unit(unit, show)
-            enabled[unit] = u.known and u.enabled and u.running
+            if _no_unit_file(u):
+                absent.add(unit)
+            enabled[unit] = _enabled(p, unit, u)
             if u.running and u.dry_run:
                 dry.add(unit)
-    return enabled, dry
+        _note_legacy(probe_unit(unit_name(CHECK, p.name), show), absent, old)
+    return enabled, dry, old, absent
+
+
+def _with_legacy_peers(plans: list[PrinterPlan], env: Env) -> list[PrinterPlan]:
+    """The printers of a subset install that still run the resident process of the first #747 design, added to
+    it. The service template is shared: the install rewrites it as a one-shot, and a peer left without its timer
+    would check once after its next restart and then never supervise again."""
+    chosen = {p.name for p in plans}
+    peers = [p for p in env.fleet_plans() if p.name not in chosen]
+    if not peers:
+        return plans
+    _, _, old, _ = _installed_state(peers, env)
+    legacy = [p for p in peers if unit_name(CHECK, p.name) in old]
+    if legacy:
+        print(
+            "note: also migrating "
+            + ", ".join(p.name for p in legacy)
+            + ": they share the supervisor template that this install replaces"
+        )
+    return [*plans, *legacy]
+
+
+def _install_layout(opts: Mapping[str, str], env: Env) -> Layout:
+    """Resolve --repo into the Layout, warning when the units would run from a worktree."""
+    layout = Layout.detect(
+        Path(opts["--repo"]).expanduser() if "--repo" in opts else None, env.units_dir()
+    )
+    if ".config/superpowers/worktrees" in str(layout.repo):
+        print(
+            f"warning: the units would run from the worktree {layout.repo}; install from the main checkout "
+            "(or pass --repo) so they survive its removal"
+        )
+    return layout
+
+
+def _print_report(report: ApplyReport) -> None:
+    for line in report.done:
+        print(f"done    {line}")
+    for line in report.skipped:
+        print(f"skipped {line}")
+    for line in report.failed:
+        print(f"FAILED  {line}")
+
+
+def _print_install_epilogue(
+    actions: Sequence[Action], linger: bool | None, *, yes: bool
+) -> None:
+    if linger is False and not yes:
+        print(
+            "linger is off: run `loginctl enable-linger` (or re-run with --yes) so the units start at boot"
+        )
+    running_old = [a.target for a in actions if a.op == "restart"]
+    if running_old:
+        print(
+            "note: restarted because they ran with --dry-run: " + ", ".join(running_old)
+        )
 
 
 def cmd_install(argv: list[str], env: Env) -> int:
@@ -782,17 +1228,10 @@ def cmd_install(argv: list[str], env: Env) -> int:
     )
     if "--unit-dir" in opts:
         env.unit_dir = Path(opts["--unit-dir"]).expanduser()
-    plans = _select(env, names, bool(opts.get("--all")))
-    layout = Layout.detect(
-        Path(opts["--repo"]).expanduser() if "--repo" in opts else None, env.units_dir()
-    )
-    if ".config/superpowers/worktrees" in str(layout.repo):
-        print(
-            f"warning: the units would run from the worktree {layout.repo}; install from the main checkout "
-            "(or pass --repo) so they survive its removal"
-        )
+    plans = _with_legacy_peers(_select(env, names, bool(opts.get("--all"))), env)
+    layout = _install_layout(opts, env)
     installed = read_installed(env.units_dir())
-    enabled, dry = _installed_state(plans, env)
+    enabled, dry, old_supervisors, _ = _installed_state(plans, env)
     dropins = find_dropins(env.units_dir(), plans, layout)
     linger = linger_enabled(env.runner())
     now = env.clock()
@@ -805,6 +1244,7 @@ def cmd_install(argv: list[str], env: Env) -> int:
         enabled=enabled,
         loaded_dry_run=dry,
         now=now,
+        old_supervisors=old_supervisors,
     )
     _print_plan(plans, actions, dropins, linger)
     needs = blocked(actions)
@@ -822,21 +1262,8 @@ def cmd_install(argv: list[str], env: Env) -> int:
             "install needs --yes", command="printer supervise", silent=True
         )
     report = apply(actions, yes=bool(opts.get("--yes")), run=env.runner(), now=now)
-    for line in report.done:
-        print(f"done    {line}")
-    for line in report.skipped:
-        print(f"skipped {line}")
-    for line in report.failed:
-        print(f"FAILED  {line}")
-    if linger is False and not opts.get("--yes"):
-        print(
-            "linger is off: run `loginctl enable-linger` (or re-run with --yes) so the units start at boot"
-        )
-    running_old = [a.target for a in actions if a.op == "restart"]
-    if running_old:
-        print(
-            "note: restarted because they ran with --dry-run: " + ", ".join(running_old)
-        )
+    _print_report(report)
+    _print_install_epilogue(actions, linger, yes=bool(opts.get("--yes")))
     print("check: 3d printer supervise status")
     if report.failed:
         raise GateFailure(
@@ -854,7 +1281,8 @@ def _print_plan(
     print(
         "supervised printers: "
         + ", ".join(
-            f"{p.name} ({'watch+vision' if p.camera else 'watch'})" for p in plans
+            f"{p.name} (supervisor + {'watch+vision' if p.camera else 'watch'} on demand)"
+            for p in plans
         )
     )
     for a in actions:
@@ -877,13 +1305,15 @@ def cmd_uninstall(argv: list[str], env: Env) -> int:
         env.unit_dir = Path(opts["--unit-dir"]).expanduser()
     plans = _select(env, names, bool(opts.get("--all")))
     layout = Layout.detect(unit_dir=env.units_dir())
-    enabled, _ = _installed_state(plans, env)
+    enabled, _, old_supervisors, absent = _installed_state(plans, env)
     actions = plan_uninstall(
         plans,
         layout,
         installed=read_installed(env.units_dir()),
         all_units=bool(opts.get("--all")),
         enabled=enabled,
+        old_supervisors=old_supervisors,
+        absent=absent,
     )
     for a in actions:
         print(

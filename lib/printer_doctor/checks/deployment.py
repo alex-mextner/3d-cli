@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from printer_doctor.context import Context
+from printer_ops.unit_names import CHECK, SUPERVISOR, unit_name
 from printer_doctor.model import (
     CannotSee,
     Check,
@@ -75,34 +76,53 @@ def _run(ctx: Context) -> Verdict:
     return Verdict.ok("vision and watch services run without --dry-run", units=units)
 
 
+def _unit_fix_steps(ctx: Context, row: object) -> list[str]:
+    """The fix commands for one evidence row, none for a healthy or an uninspectable unit."""
+    from printer_ops.deploy_check import UnitVerdict, fix_commands
+
+    if not isinstance(row, Mapping):
+        return []
+    unit = UnitVerdict(
+        str(row.get("unit")),
+        str(row.get("state")),
+        row.get("dry_run") is True,
+        str(row.get("source") or ""),
+    )
+    if unit.ok or unit.state == "unknown":
+        return []
+    return [
+        command(c) if c.split(None, 1)[0] in ("systemctl", "3d") else c
+        for c in fix_commands(ctx.name, unit)
+    ]
+
+
+def _supervisor_steps(ctx: Context, result: CheckResult) -> list[str]:
+    """No worker unit to fix: the supervisor timer or its one-shot check is what the warning names."""
+    name = shlex.quote(ctx.name)
+    warnings = result.evidence.get("warnings")
+    text = " ".join(str(w) for w in warnings) if isinstance(warnings, list) else ""
+    timer, check = unit_name(SUPERVISOR, ctx.name), unit_name(CHECK, ctx.name)
+    if f"{timer} is not-found" in text or f"{check} is not-found" in text:
+        return [
+            command(f"3d printer supervise install {name} --yes")
+        ]  # nothing to enable: no unit files
+    if f"{check} is failed" in text:
+        # the timer runs: enabling it again fixes nothing, the check itself fails
+        return [f"read the journal of the check: journalctl --user -u {shlex.quote(check)} -n 20"]
+    # #747: only the supervisor timer is enabled; its one-shot check starts the vision and watch workers while a print runs
+    return [command(f"systemctl --user enable --now {shlex.quote(timer)}")]
+
+
 def _steps(ctx: Context, result: CheckResult) -> list[str]:
     """The fix commands for the units the run itself found failing (rebuilt from its evidence, so
     systemd is asked once, not again for the steps)."""
-    from printer_ops.deploy_check import UnitVerdict, fix_commands
-
-    steps: list[str] = []
     units = result.evidence.get("units")
-    for row in units if isinstance(units, list) else []:
-        if not isinstance(row, Mapping):
-            continue
-        unit = UnitVerdict(
-            str(row.get("unit")),
-            str(row.get("state")),
-            row.get("dry_run") is True,
-            str(row.get("source") or ""),
-        )
-        if not unit.ok and unit.state != "unknown":
-            steps += [
-                command(c) if c.split(None, 1)[0] in ("systemctl", "3d") else c
-                for c in fix_commands(ctx.name, unit)
-            ]
-    if not steps:
-        name = shlex.quote(ctx.name)
-        steps = [
-            command(f"systemctl --user enable --now 3d-printer-vision@{name}.service"),
-            command(f"systemctl --user enable --now 3d-printer-watch@{name}.service"),
-        ]
-    return steps
+    steps = [
+        step
+        for row in (units if isinstance(units, list) else [])
+        for step in _unit_fix_steps(ctx, row)
+    ]
+    return steps or _supervisor_steps(ctx, result)
 
 
 CHECKS = (

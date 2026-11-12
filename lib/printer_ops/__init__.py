@@ -6,9 +6,13 @@ preflight.py (`3d print-preflight` checks). All stdlib (+ lazy pyyaml for the co
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+# not `from typing import TYPE_CHECKING`: importing typing costs ~4 ms, and the on-demand check
+# (printer_ops/ondemand.py, a one-shot process every 30 s) imports this package; PEP 484 allows the local constant
+TYPE_CHECKING = False
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from printer_ops.base import Adapter
     from printer_ops.devices import Device
     from printer_ops.move_bounds import Limits

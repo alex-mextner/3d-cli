@@ -379,11 +379,18 @@ skills (`atomic-commits`, `ai-review-before-commit`, `pre-commit-gate`,
   (a FAIL blocks; `--force` alone does not override it: a forced start needs the owner's one-time Telegram
   hatch approval, `lib/printer_ops/force_hatch.py`; fix the cause of each FAIL instead). Tests use the loopback fakes in `tests/printer_fakes.py`;
   agents never point tests or ad-hoc runs at real printers. See `docs/commands/printer.md`.
-- `printer supervise status|install|uninstall|quiet` is the ALWAYS-ON AI supervision (`printer_ops/supervise.py`,
-  `supervise_units.py`, doctor check `printer-supervision`): the `3d-printer-watch@NAME` / `3d-printer-vision@NAME` user
+- `printer supervise status|install|uninstall|quiet` is the ON-DEMAND AI supervision (`printer_ops/supervise.py`,
+  `supervise_units.py`, `ondemand.py`, doctor check `printer-supervision`, #747): a systemd TIMER per printer
+  (`3d-printer-ondemand@NAME.timer`, no process between checks) runs a ~20 ms one-shot check every 30 s
+  (`python -S -m printer_ops.ondemand`, stdlib only, one request, state only in a RAM file under
+  `$XDG_RUNTIME_DIR`, rewritten only on change, no journal line while idle) that starts the
+  `3d-printer-watch@NAME` / `3d-printer-vision@NAME` workers only while a print runs and stops them after a grace
+  period (the workers have no `[Install]`; a stopped worker is the right state for an idle printer; keep
+  `ondemand.py` free of heavy imports: `tests/e2e/test_printer_ondemand_workflows.py` pins its cost). The user
   units are SHIPPED from the repo (no hand-made unit, no `--dry-run`, no gate on a marker; `watch --install-service`
-  is gone), `Restart=always`, linger, waiting for a switched-off printer, catching a print start from any route, with
-  a heartbeat that `status`/doctor judge and an `ExecStopPost` one-line tg when a supervisor dies during a print.
+  is gone); the workers carry `Restart=always` and an `ExecStopPost` one-line tg when one dies during a print, and
+  a heartbeat that `status`/doctor judge; linger, waiting for a switched-off printer and catching a print start from
+  any route are the timer's check.
   The owner's requirement (2026-10-24): AI control of printers must ALWAYS work while a print runs, also when the
   printer is powered off between prints, however a print was started, with Home Assistant and without it
   (`tests/test_printer_supervision_ha_free.py`, `tests/test_printer_supervision_e2e.py`). The `NAME.intentional-off`

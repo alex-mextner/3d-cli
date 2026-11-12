@@ -210,8 +210,13 @@ def test_render_refuses_a_package_whose_block_was_edited_away() -> None:
 def test_detect_uses_configured_url_known_names_and_never_writes(
     fake_ha: FakeHa,
 ) -> None:
+    def only_the_fake(url: str) -> tuple[int, str]:
+        # hermetic (#748): the known-name probes (homeassistant.local, ...) must not reach the machine's real
+        # name resolution, where a real Home Assistant may answer
+        return ha_detect.http_get(url) if url.startswith(fake_ha.url) else (0, "")
+
     found = ha_detect.detect_ha(
-        env={"HA_URL": fake_ha.url}, hosts=[], fetch=ha_detect.http_get, mdns=lambda: []
+        env={"HA_URL": fake_ha.url}, hosts=[], fetch=only_the_fake, mdns=lambda: []
     )
     assert [(f.url, f.via) for f in found] == [(fake_ha.url, "configured")]
     assert {r[0] for r in fake_ha.requests} == {"GET"}
