@@ -97,17 +97,17 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        uneven first layer): tg --photo warnings only, never a stop,
                                        and a monitor-report/ folder at the end; --no-quality
   supervise status|install|uninstall|quiet [NAME...|--all]
-                                       the ON-DEMAND supervision: one tiny always-on supervisor per owned
-                                       printer (`ondemand`, below) that starts the watch and vision systemd user
-                                       units only while a print runs, from the fleet registry, running without a
-                                       login, waiting for a switched-off printer, catching every print start;
-                                       `status` FAILs when a printing/answering printer is unsupervised
+                                       the ON-DEMAND supervision: one systemd timer per owned printer
+                                       (`ondemand`, below; no process between checks) whose one-shot check
+                                       starts the watch and vision systemd user units only while a print runs,
+                                       from the fleet registry, running without a login, waiting for a
+                                       switched-off printer, catching every print start; `status` FAILs when a
+                                       printing/answering printer is unsupervised
                                        (see `3d printer supervise --help`)
-  ondemand NAME [--poll S] [--grace S] [--once]
-                                       the supervisor itself (~18 MB, no disk): one small request to the printer
-                                       every 30 s, starts the watch + vision workers while a print runs, stops
-                                       them completely a grace period after it; --once shows what it sees
-                                       (see `3d printer ondemand --help`)
+  ondemand NAME [--grace S] [--once]   the check itself (what the timer runs every 30 s, ~20 ms, RAM state only):
+                                       one small request to the printer, starts the watch + vision workers
+                                       while a print runs, stops them completely a grace period after it;
+                                       --once shows what it sees (see `3d printer ondemand --help`)
   vision NAME [options]                camera failure detection (spaghetti, detached part, stale/dark camera)
                                        and print quality (stringing, lost bead pattern, uneven first layer:
                                        warnings only, --no-quality) into the same event sinks as watch; also

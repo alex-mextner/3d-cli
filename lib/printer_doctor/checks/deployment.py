@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from printer_doctor.context import Context
+from printer_ops.unit_names import CHECK, SUPERVISOR, unit_name
 from printer_doctor.model import (
     CannotSee,
     Check,
@@ -95,6 +96,23 @@ def _unit_fix_steps(ctx: Context, row: object) -> list[str]:
     ]
 
 
+def _supervisor_steps(ctx: Context, result: CheckResult) -> list[str]:
+    """No worker unit to fix: the supervisor timer or its one-shot check is what the warning names."""
+    name = shlex.quote(ctx.name)
+    warnings = result.evidence.get("warnings")
+    text = " ".join(str(w) for w in warnings) if isinstance(warnings, list) else ""
+    timer, check = unit_name(SUPERVISOR, ctx.name), unit_name(CHECK, ctx.name)
+    if f"{timer} is not-found" in text or f"{check} is not-found" in text:
+        return [
+            command(f"3d printer supervise install {name} --yes")
+        ]  # nothing to enable: no unit files
+    if f"{check} is failed" in text:
+        # the timer runs: enabling it again fixes nothing, the check itself fails
+        return [f"read the journal of the check: journalctl --user -u {shlex.quote(check)} -n 20"]
+    # #747: only the supervisor timer is enabled; its one-shot check starts the vision and watch workers while a print runs
+    return [command(f"systemctl --user enable --now {shlex.quote(timer)}")]
+
+
 def _steps(ctx: Context, result: CheckResult) -> list[str]:
     """The fix commands for the units the run itself found failing (rebuilt from its evidence, so
     systemd is asked once, not again for the steps)."""
@@ -104,13 +122,7 @@ def _steps(ctx: Context, result: CheckResult) -> list[str]:
         for row in (units if isinstance(units, list) else [])
         for step in _unit_fix_steps(ctx, row)
     ]
-    if not steps:
-        name = shlex.quote(ctx.name)
-        # #747: only the supervisor is enabled; it starts the vision and watch workers while a print runs
-        steps = [
-            command(f"systemctl --user enable --now 3d-printer-ondemand@{name}.service")
-        ]
-    return steps
+    return steps or _supervisor_steps(ctx, result)
 
 
 CHECKS = (

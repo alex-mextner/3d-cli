@@ -1,23 +1,22 @@
-"""`3d printer ondemand` end to end (#747): the real `bin/3d`, and the REAL supervisor process
-(`python -m printer_ops.ondemand`) polling a loopback fake Moonraker while a fake `systemctl` on PATH records what it
-starts and stops. The printer state is SIMULATED: no real printer, systemd or tg is touched.
+"""`3d printer ondemand` end to end (#747): the real `bin/3d`, and the REAL one-shot check process
+(`python -S -m printer_ops.ondemand`, exactly what the systemd timer runs) against a loopback fake Moonraker while
+a fake `systemctl` on PATH records what it starts and stops. The printer state is SIMULATED: no real printer, systemd
+or tg is touched.
 
-The story: idle printer -> nothing runs and the supervisor stays small; a print starts -> both workers start within one
-poll; the print ends -> they stay for the grace period, then stop; a supervisor restart (SIGTERM) leaves running workers
-alone."""
+The story: idle printer -> nothing runs, nothing is written after the first check and every check is a few
+milliseconds; a print starts -> both workers start at the next check; the print ends -> they stay for the grace
+period, then stop; the runtime directory vanishing (a reboot) in the middle of a print leaves running workers alone."""
 
 from __future__ import annotations
 
 import json
 import os
-import signal
-import socket
+import shutil
 import stat
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,13 +65,14 @@ for u in units:
 """
 
 WORKERS = "3d-printer-watch@p1.service 3d-printer-vision@p1.service"
+UNITS = sorted(WORKERS.split())
 
 
 @dataclass
 class Lab:
     env: dict[str, str]
     fake: Path
-    notify: socket.socket
+    runtime: Path
 
     def calls(self) -> list[str]:
         path = self.fake / "calls.log"
@@ -83,27 +83,8 @@ class Lab:
             p.name.removesuffix(".active") for p in self.fake.glob("*.active")
         )
 
-    def wait_for(self, what: Callable[[], bool], timeout: float = 30.0) -> bool:
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            if what():
-                return True
-            time.sleep(0.1)
-        return False
-
-    def messages(
-        self, until: Callable[[list[str]], bool], timeout: float = 30.0
-    ) -> list[str]:
-        """sd_notify datagrams received so far, read until `until(them)` holds (or the timeout)."""
-        got: list[str] = []
-        end = time.monotonic() + timeout
-        while time.monotonic() < end and not until(got):
-            self.notify.settimeout(0.2)
-            try:
-                got.append(self.notify.recv(4096).decode())
-            except TimeoutError:
-                continue
-        return got
+    def state_files(self) -> list[Path]:
+        return sorted(self.runtime.rglob("*")) if self.runtime.exists() else []
 
 
 @pytest.fixture
@@ -117,9 +98,6 @@ def lab(
     ctl = bin_dir / "systemctl"
     ctl.write_text(SYSTEMCTL.format(python=sys.executable))
     ctl.chmod(ctl.stat().st_mode | stat.S_IXUSR)
-    notify = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    name = f"3d-ondemand-test-{os.getpid()}-{time.monotonic_ns()}"
-    notify.bind("\0" + name)  # abstract namespace: no file, no path-length limit
 
     def make(port: int) -> Lab:
         (tmp_path / "fleet.yaml").write_text(FLEET.format(port=port), encoding="utf-8")
@@ -130,16 +108,15 @@ def lab(
             THREED_FLEET=str(tmp_path / "fleet.yaml"),
             XDG_CONFIG_HOME=str(tmp_path / "config"),
             XDG_STATE_HOME=str(tmp_path / "state"),
+            XDG_RUNTIME_DIR=str(tmp_path / "run"),
             FAKE_SYSTEMD=str(fake),
             PATH=f"{bin_dir}:{env.get('PATH', '')}",
             PYTHONPATH=str(REPO / "lib"),
             PYTHONUNBUFFERED="1",
-            NOTIFY_SOCKET="@" + name,
         )
-        return Lab(env, fake, notify)
+        return Lab(env, fake, tmp_path / "run")
 
     yield make
-    notify.close()
 
 
 def run3d(lab: Lab, *args: str) -> subprocess.CompletedProcess[str]:
@@ -154,36 +131,24 @@ def run3d(lab: Lab, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def rss_mb(pid: int) -> float:
-    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-        if line.startswith("VmRSS"):
-            return int(line.split()[1]) / 1024
-    raise AssertionError("no VmRSS")
-
-
-@contextmanager
-def supervisor(lab: Lab, log: Path, *flags: str) -> Iterator[subprocess.Popen[str]]:
-    with log.open("w") as out:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "printer_ops.ondemand", "p1", *flags],
-            env=lab.env,
-            cwd=REPO,
-            stdout=out,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        try:
-            yield proc
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait(10)
+def check(lab: Lab, *flags: str) -> subprocess.CompletedProcess[str]:
+    """One scheduled check, as the unit runs it."""
+    return subprocess.run(
+        [sys.executable, "-S", "-m", "printer_ops.ondemand", "p1", *flags],
+        env=lab.env,
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
 
 
 # ---- the command through bin/3d ----------------------------------------------------------------
 
 
 def test_help_lists_the_command_and_its_options(lab: Callable[[int], Lab]) -> None:
+    """An owner asking the CLI for help finds the one-shot check, its options, and a clear refusal for a bad name or a removed flag."""
     lb = lab(free_port())
     helped = run3d(lb, "printer", "ondemand", "--help")
     assert (
@@ -193,13 +158,18 @@ def test_help_lists_the_command_and_its_options(lab: Callable[[int], Lab]) -> No
     )
     assert "ondemand NAME" in run3d(lb, "printer", "--help").stdout
     assert run3d(lb, "printer", "ondemand").returncode == 1  # no NAME: usage, exit 1
-    bad = run3d(lb, "printer", "ondemand", "p1", "--poll", "1")
+    bad = run3d(
+        lb, "printer", "ondemand", "p1", "--poll", "1"
+    )  # the cadence is the timer's now
     assert bad.returncode == 2 and "poll" in bad.stderr
+    odd = run3d(lb, "printer", "ondemand", "../p1", "--once")
+    assert odd.returncode == 2 and "not a printer name" in odd.stderr
 
 
 def test_once_reports_what_the_printer_says_and_what_would_happen(
     lab: Callable[[int], Lab],
 ) -> None:
+    """An owner runs one check by hand and reads what the printer reported and what would start or stop."""
     fake = FakeMoonraker(status=u1_status("standby"))
     with fake.serve():
         lb = lab(fake.port)
@@ -224,11 +194,13 @@ def test_once_reports_what_the_printer_says_and_what_would_happen(
     assert not any(
         c.startswith(("start", "stop")) for c in lb.calls()
     )  # --once only looks
+    assert lb.state_files() == []  # and writes no state
 
 
 def test_once_on_an_unreachable_printer_exits_1_and_says_it_will_back_off(
     lab: Callable[[int], Lab],
 ) -> None:
+    """An owner checks a switched-off printer: the command fails and says it will back off."""
     lb = lab(free_port())
     r = run3d(lb, "printer", "ondemand", "p1", "--once")
     doc = json.loads(r.stdout)
@@ -240,126 +212,184 @@ def test_once_on_an_unreachable_printer_exits_1_and_says_it_will_back_off(
     assert doc["error"]
 
 
-# ---- the real supervisor process ---------------------------------------------------------------
+# ---- the real one-shot check -------------------------------------------------------------------
 
 
-def test_the_supervisor_follows_a_simulated_print_and_leaves_the_workers_alone_on_restart(
-    lab: Callable[[int], Lab], tmp_path: Path
+def test_the_check_follows_a_simulated_print_and_a_vanished_runtime_directory_leaves_the_workers_alone(
+    lab: Callable[[int], Lab],
 ) -> None:
+    """The timer's checks start workers for a print and stop them after it; losing the runtime directory changes nothing."""
     fake = FakeMoonraker(status=u1_status("standby"))
     with fake.serve():
         lb = lab(fake.port)
-        log = tmp_path / "supervisor.log"
-        with supervisor(lb, log, "--poll", "5", "--grace", "2") as proc:
-            # idle: ready, tiny, and it never touched systemd
-            assert any(
-                m == "READY=1" for m in lb.messages(lambda got: "READY=1" in got)
-            )
-            assert lb.calls() == [
-                f"is-active {WORKERS}"
-            ]  # the one reconcile look at start, nothing else
-            assert rss_mb(proc.pid) < 25, "the supervisor must stay tiny"
-
-            # a print starts (simulated): both workers within one poll (SIGHUP asks for the poll now)
-            fake.status["print_stats"].update(state="printing", filename="part.gcode")
-            proc.send_signal(signal.SIGHUP)
-            assert lb.wait_for(lambda: lb.running() == sorted(WORKERS.split())), (
-                lb.calls()
-            )
-            assert f"start {WORKERS}" in lb.calls()
-
-            # it ends: they stay for the grace period, then stop completely
-            fake.status["print_stats"]["state"] = "complete"
-            proc.send_signal(signal.SIGHUP)
-            assert lb.wait_for(
-                lambda: "print ended: workers stay 2 s, then stop" in log.read_text()
-            )
-            assert lb.running() == sorted(WORKERS.split())
-            time.sleep(2.2)
-            proc.send_signal(signal.SIGHUP)
-            assert lb.wait_for(lambda: lb.running() == [])
-            assert f"stop {WORKERS}" in lb.calls()
-
-            # a second print, then a supervisor restart: SIGTERM exits 0 and stops nothing
-            fake.status["print_stats"]["state"] = "printing"
-            proc.send_signal(signal.SIGHUP)
-            assert lb.wait_for(lambda: len(lb.running()) == 2)
-            stops = [c for c in lb.calls() if c.startswith("stop")]
-            proc.send_signal(signal.SIGTERM)
-            assert proc.wait(10) == 0
-            assert [c for c in lb.calls() if c.startswith("stop")] == stops and len(
-                lb.running()
-            ) == 2
-
-        text = log.read_text()
-        for line in (
-            "p1: supervising moonraker 127.0.0.1:",
-            f"p1: print started: starting {WORKERS.replace(' ', ', ')}",
-            "p1: grace over: workers stopped",
-            "p1: stopping (workers are left as they are)",
-        ):
-            assert line in text, text
-        states = [
-            m for m in lb.messages(lambda _got: False, 0.5) if m.startswith("STATUS=")
+        # idle: the first check logs once and writes its state; the next ones say and write nothing
+        first = check(lb, "--grace", "2")
+        assert first.returncode == 0 and first.stdout.count("\n") == 1, first
+        assert "p1: supervising moonraker 127.0.0.1:" in first.stdout
+        state = lb.runtime / "3d-cli" / "ondemand" / "p1.json"
+        written = state.stat().st_mtime_ns
+        assert lb.state_files() == [
+            lb.runtime / "3d-cli",
+            state.parent,
+            state,
+            state.with_name("p1.json.lock"),
         ]
+        for _ in range(3):
+            again = check(lb, "--grace", "2")
+            assert (again.returncode, again.stdout, again.stderr) == (0, "", "")
+        assert state.stat().st_mtime_ns == written  # not rewritten
+        # only looks at the workers (the first check's, plus the random one-in-twenty stray look), never an action
+        assert lb.calls() and set(lb.calls()) == {f"is-active {WORKERS}"}
+        assert lb.running() == []
+
+        # a print starts (simulated): both workers at the next check, once
+        fake.status["print_stats"].update(state="printing", filename="part.gcode")
+        started = check(lb, "--grace", "2")
         assert (
-            any(
-                "printer=idle phase=idle" in m
-                for m in states + ["STATUS=printer=idle phase=idle"]
-            )
-            or states
+            f"p1: print started: starting {WORKERS.replace(' ', ', ')}"
+            in started.stdout
         )
+        assert lb.running() == UNITS and f"start {WORKERS}" in lb.calls()
+        assert check(lb, "--grace", "2").stdout == ""  # running: silent
+
+        # it ends: they stay for the grace period, then stop completely
+        fake.status["print_stats"]["state"] = "complete"
+        ended = check(lb, "--grace", "2")
+        assert "print ended: workers stay 2 s, then stop" in ended.stdout
+        assert lb.running() == UNITS
+        time.sleep(2.2)
+        stopped = check(lb, "--grace", "2")
+        assert "p1: grace over: workers stopped" in stopped.stdout
+        assert lb.running() == [] and f"stop {WORKERS}" in lb.calls()
+
+        # a second print, then the runtime directory vanishes (a reboot that left the workers up): nothing is
+        # restarted and nothing is stopped
+        fake.status["print_stats"]["state"] = "printing"
+        check(lb, "--grace", "2")
+        starts = [c for c in lb.calls() if c.startswith("start")]
+        shutil.rmtree(lb.runtime)
+        after = check(lb, "--grace", "2")
+        assert after.returncode == 0
+        assert [c for c in lb.calls() if c.startswith("start")] == starts
+        assert len([c for c in lb.calls() if c.startswith("stop")]) == 1
+        assert lb.running() == UNITS
 
 
-def test_a_restarted_supervisor_adopts_running_workers_and_stops_them_when_nothing_prints(
-    lab: Callable[[int], Lab], tmp_path: Path
+def test_workers_that_run_at_the_first_check_with_no_print_are_kept_one_grace_period_then_stopped(
+    lab: Callable[[int], Lab],
 ) -> None:
+    """After an install over a running worker, the idle printer's workers get one grace period, then stop."""
     fake = FakeMoonraker(status=u1_status("standby"))
     with fake.serve():
         lb = lab(fake.port)
-        for unit in WORKERS.split():
+        for unit in UNITS:
             (
                 lb.fake / f"{unit}.active"
-            ).touch()  # left over from a previous incarnation
-        log = tmp_path / "supervisor.log"
-        with supervisor(lb, log, "--poll", "5", "--grace", "1") as proc:
-            assert lb.wait_for(lambda: "already running at start" in log.read_text())
-            assert lb.running() == sorted(
-                WORKERS.split()
-            )  # kept for a fresh grace period, not killed at once
-            time.sleep(1.2)
-            proc.send_signal(signal.SIGHUP)
-            assert lb.wait_for(lambda: lb.running() == [])
-
-
-def test_an_unreachable_printer_never_starts_workers_and_the_supervisor_keeps_running(
-    lab: Callable[[int], Lab], tmp_path: Path
-) -> None:
-    lb = lab(free_port())
-    log = tmp_path / "supervisor.log"
-    with supervisor(lb, log, "--poll", "5", "--grace", "1") as proc:
-        assert lb.wait_for(lambda: "does not answer" in log.read_text())
-        proc.send_signal(signal.SIGHUP)
-        time.sleep(3)
-        assert proc.poll() is None and lb.calls() == [f"is-active {WORKERS}"]
+            ).touch()  # left over from before the reboot / by hand
+        first = check(lb, "--grace", "1")
+        assert "workers already running at the first check" in first.stdout
         assert (
-            log.read_text().count("does not answer") == 1
-        )  # one line per reason, not one per poll
+            lb.running() == UNITS
+        )  # kept for a fresh grace period, not killed at once
+        time.sleep(1.2)
+        assert "grace over: workers stopped" in check(lb, "--grace", "1").stdout
+        assert lb.running() == []
 
 
-def test_a_broken_configuration_waits_instead_of_crash_looping(
+def test_an_unreachable_printer_never_starts_workers_and_is_logged_once(
+    lab: Callable[[int], Lab],
+) -> None:
+    """A printer that never answers gets no workers, and the journal says so only once."""
+    lb = lab(free_port())
+    runs = [check(lb, "--grace", "1") for _ in range(4)]
+    assert all(
+        r.returncode == 0 for r in runs
+    )  # an off printer is not a failure of the check
+    assert sum("does not answer" in r.stdout for r in runs) == 1
+    assert [c for c in lb.calls() if c.startswith(("start", "stop"))] == []
+    assert lb.running() == []
+
+
+def test_a_broken_configuration_is_logged_once_and_never_crash_loops(
     lab: Callable[[int], Lab], tmp_path: Path
 ) -> None:
+    """A broken printer configuration is reported once and does not make the unit crash-loop."""
     lb = lab(free_port())
     lb.env["THREED_FLEET"] = str(tmp_path / "missing.yaml")
-    log = tmp_path / "supervisor.log"
-    with supervisor(lb, log) as proc:
-        assert lb.wait_for(
-            lambda: "cannot read the printer configuration" in log.read_text(), 60
+    runs = [check(lb) for _ in range(4)]
+    assert all(r.returncode == 0 for r in runs), [r.stderr for r in runs]
+    assert sum("cannot read the printer configuration" in r.stdout for r in runs) == 1
+    assert lb.calls() == []
+
+
+def test_a_printer_the_configuration_does_not_supervise_is_logged_once_and_not_resolved_again(
+    lab: Callable[[int], Lab],
+) -> None:
+    """A printer the configuration excludes from supervision is logged once and not resolved again."""
+    lb = lab(free_port())
+    fleet = Path(lb.env["THREED_FLEET"])
+    fleet.write_text(FLEET.format(port=1).replace("owner: own", "owner: neighbour"), encoding="utf-8")
+    runs = [check(lb) for _ in range(3)]
+    assert all(r.returncode == 0 for r in runs), [r.stderr for r in runs]
+    assert sum("not supervised any more" in r.stdout for r in runs) == 1
+    assert json.loads((lb.runtime / "3d-cli" / "ondemand" / "p1.json").read_text())["refused"]
+    assert lb.calls() == []  # no worker is touched and no printer is asked
+
+
+# ---- what one check costs ----------------------------------------------------------------------
+
+
+def test_a_check_is_a_few_milliseconds_and_a_few_megabytes_and_imports_nothing_heavy(
+    lab: Callable[[int], Lab],
+) -> None:
+    """An idle check costs a few milliseconds and megabytes and imports nothing heavy."""
+    fake = FakeMoonraker(status=u1_status("standby"))
+    with fake.serve():
+        lb = lab(fake.port)
+        check(lb)  # the first one resolves the config (yaml): not the steady state
+        probe = (
+            "import resource, subprocess, sys, time\n"
+            "t = time.perf_counter()\n"
+            "subprocess.run(sys.argv[1:], check=True)\n"
+            "wall = time.perf_counter() - t\n"
+            "print(wall, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024)\n"
         )
-        assert (
-            proc.poll() is None
-        )  # alive (READY was sent, so systemd does not time the start out)
-        assert "READY=1" in lb.messages(lambda got: "READY=1" in got, 5)
-        proc.send_signal(signal.SIGTERM)
-        assert proc.wait(15) == 0
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                probe,
+                sys.executable,
+                "-S",
+                "-m",
+                "printer_ops.ondemand",
+                "p1",
+            ],
+            env=lb.env,
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        wall, rss = (float(x) for x in r.stdout.split())
+        assert wall < 1.0, f"a steady-state check took {wall:.2f} s"
+        assert rss < 25, f"a steady-state check peaked at {rss:.1f} MB"
+
+
+def test_importing_the_check_loads_none_of_the_heavy_modules() -> None:
+    """Importing the check module in a bare interpreter loads none of the heavy modules."""
+    code = (
+        "import sys, printer_ops.ondemand\n"
+        "heavy = {'yaml', 'ssl', 'http.client', 'subprocess', 'dataclasses', 'pathlib', 'inspect', 'typing', 'numpy'}\n"
+        "print(sorted(heavy & set(sys.modules)))\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-S", "-c", code],
+        env={**os.environ, "PYTHONPATH": str(REPO / "lib")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    assert r.stdout.strip() == "[]", r.stdout

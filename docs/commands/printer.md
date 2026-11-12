@@ -30,7 +30,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer supervise install [NAME...|--all] [--yes] [--plan] [--repo DIR] [--unit-dir DIR]
 3d printer supervise uninstall [NAME...|--all] [--yes] [--unit-dir DIR]
 3d printer supervise quiet NAME [--reason TEXT] | --clear
-3d printer ondemand NAME [--poll S] [--grace S] [--once]
+3d printer ondemand NAME [--grace S] [--once]
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] [--no-detach] ...  |  vision eval ...  |  vision record NAME DIR [--timeout S]  |  vision fetch-model
 3d printer bed status NAME [--json] [--max-age S] [--best-view | --no-move] [--part-height MM]  |  bed reference NAME [--capture [--best-view] [--no-plate]] | bed reference NAME --refresh [--assume-empty WHY]  |  bed calibrate NAME [--z-from A --z-to B --z-step S] [--part-height MM]  |  bed monitor NAME
 3d printer subscribe --session ID [--printer P,P] [--kinds K,K] [--min-severity LEVEL] ...
@@ -59,8 +59,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `evidence NAME --out DIR` | After EVERY print (done, cancelled, failed): save the Moonraker history job and the klippy.log lines around its pauses and errors as `DIR/<date>-<outcome>.md` + `.json`, with the layer of each stop when `--gcode` is given; GET only. See [printer-evidence.md](printer-evidence.md). |
 | `guard NAME --job-id ID --yes` | Authorize one automatic native PAUSE of this exact live Moonraker job on confirmed camera failure; [policy and readiness](printer-vision.md#one-job-automatic-pause). |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
-| `supervise status\|install\|uninstall\|quiet` | The ON-DEMAND supervision: one tiny always-on supervisor per owned printer from the fleet registry that starts the watch and vision systemd user units only while a print runs, running without a login, waiting for a switched-off printer, catching every print start; `status` FAILs when a printing/answering printer is unsupervised — see [Always-on supervision](#always-on-supervision). |
-| `ondemand NAME [--once]` | The supervisor itself: one small request to the printer every 30 s, starts `3d-printer-watch@NAME` and `3d-printer-vision@NAME` while a print runs and stops them completely a grace period after it; `--once` shows what it sees — see [On-demand supervision](#on-demand-supervision-747). |
+| `supervise status\|install\|uninstall\|quiet` | The ON-DEMAND supervision: one systemd timer per owned printer (no process between its 30 s checks) from the fleet registry whose one-shot check starts the watch and vision systemd user units only while a print runs, running without a login, waiting for a switched-off printer, catching every print start; `status` FAILs when a printing/answering printer is unsupervised — see [Always-on supervision](#always-on-supervision). |
+| `ondemand NAME [--once]` | The check the supervisor timer runs every 30 s (a one-shot, ~20 ms, no process in between): one small request to the printer, starts `3d-printer-watch@NAME` and `3d-printer-vision@NAME` while a print runs and stops them completely a grace period after it; `--once` shows what it sees — see [On-demand supervision](#on-demand-supervision-747). |
 | `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
 | `bed status` / `reference` / `monitor` | Is the bed clear, is the build plate on — from the camera against an empty-bed reference; also the `bed` start gate and the `bed_clear` event — see [Bed state](#bed-state). |
 | `subscribe` / `unsubscribe` / `subscriptions` | Route printer alerts to an AI agent first: it looks at the frame and tells the user only if the failure is real — see [printer-subscribe.md](printer-subscribe.md). |
@@ -664,20 +664,23 @@ G-code macro: the watcher sees only the printer's own state edge, never who caus
 ### On-demand supervision (#747)
 
 [#747](https://github.com/alex-mextner/3d-cli/issues/747): nothing may cost memory, CPU or disk while no print runs
-(before it: two idle vision processes at 1.7 GiB in total, 4.6 % of a core, 104 file writes per minute). So only a tiny
-supervisor is always on; the heavy `watch` and `vision` units exist only while a print does.
+(before it: two idle vision processes at 1.7 GiB in total, 4.6 % of a core, 104 file writes per minute). So no process
+of ours lives between checks at all: a systemd **timer** per printer runs a ~20 ms one-shot check every 30 s, and the
+heavy `watch` and `vision` units exist only while a print does.
 
 | Unit | Runs | Costs |
 |---|---|---|
-| `3d-printer-ondemand@NAME` (`3d printer ondemand NAME`, `printer_ops/ondemand.py`) | always, enabled, `Type=notify` | ~18 MB RSS, one 331-byte request per 30 s, no file, no journal line while idle |
-| `3d-printer-watch@NAME`, `3d-printer-vision@NAME` | started by the supervisor when a print is `printing` or `paused`, stopped `grace` seconds after it ends | as before, but only during a print (plus the grace period) |
+| `3d-printer-ondemand@NAME.timer` | always armed and enabled (held by systemd, no process) | nothing |
+| `3d-printer-ondemand@NAME.service` (`3d printer ondemand NAME`, `printer_ops/ondemand.py`) | one-shot, started by the timer every 30 s (30 s after the previous check finished) | ~20 ms CPU, ~15 MB for that moment, one 331-byte request, no journal line, no file write while idle |
+| `3d-printer-watch@NAME`, `3d-printer-vision@NAME` | started by the check when a print is `printing` or `paused`, stopped `grace` seconds after it ends | as before, but only during a print (plus the grace period) |
 
-The question (every `--poll` seconds, default 30, at least 5): Moonraker `GET /printer/objects/query?print_stats&webhooks`
-over a raw socket (`print_stats.state` is `printing` or `paused` and Klipper is `ready`: a print runs; HTTP 503 means
-Klipper is down: no print); creality-stock reads the `ws:9999` state push once (state 1, 5 or 7). A websocket
-subscription was rejected: Moonraker pushes `notify_proc_stat_update` to every websocket client each second, so it
-costs a 1 Hz wake-up and an open connection on the printers' small boards, and systemd path or socket activation cannot
-see a remote printer.
+The question (every timer tick): Moonraker `GET /printer/objects/query?print_stats&webhooks` over a raw socket
+(`print_stats.state` is `printing` or `paused` and Klipper is `ready`: a print runs; HTTP 503 means Klipper is down: no
+print); creality-stock reads the `ws:9999` state push once (state 1, 5 or 7). A websocket subscription was rejected:
+Moonraker pushes `notify_proc_stat_update` to every websocket client each second, so it costs a 1 Hz wake-up and an
+open connection on the printers' small boards; the printers cannot push a print start to us, and systemd path or socket
+activation cannot see a remote printer. A resident polling process (the first design of #747, ~18 MB per printer and a
+wake-up every 30 s) was replaced by the timer: the same checks, nothing resident.
 
 ```text
 idle ──print runs──> active ──print ends / printer lost──> grace ──grace over──> idle (workers stopped)
@@ -685,43 +688,75 @@ idle ──print runs──> active ──print ends / printer lost──> grace
                        └────────────print runs again──────────┘
 ```
 
-- **A print started from anywhere** (touchscreen, Fluidd, slicer, Home Assistant, macro) is seen within one poll; the
-  workers start before the first layer (heating takes minutes). The watcher then announces it as `print_started` with
-  `adopted: true`.
+- **State between checks** is one small file per printer, `$XDG_RUNTIME_DIR/3d-cli/ondemand/NAME.json` (tmpfs: RAM,
+  never the disk, gone at reboot together with the workers): the resolved printer address and the mtimes of the config
+  files it came from (the heavy yaml/fleet loader runs in a one-shot child only when one changed), the phase, the
+  grace deadline, the miss count and the last error. It is rewritten **only when its content changed** (a transition, a
+  config change), so an idle printer writes nothing. systemd's own `Starting`/`Finished` journal lines are silenced
+  with `LogLevelMax=notice`; the check logs one line per transition (print started, print ended, grace over, printer
+  lost, printer back), never per check.
+- **One check at a time per printer**: a check holds an exclusive non-blocking `flock` on `NAME.json.lock` (created once,
+  afterwards opened read-only, so an idle check writes nothing for it). The timer never overlaps its own one-shot, but a
+  hand-run `3d printer ondemand NAME` can; a check that finds the lock taken exits at once and leaves the work to the
+  other one (exit 75, a failed run on purpose, so a skipped check never looks like a fresh poll in `supervise status`),
+  so an older check can never stop workers a newer one just started. The cached printer address is dropped when the
+  selected fleet file (`THREED_FLEET`), the config directory or the checkout changes, not only when a config file's
+  mtime does.
+- **A print started from anywhere** (touchscreen, Fluidd, slicer, Home Assistant, macro) is seen at the next check (at
+  most about 30 s); the workers start before the first layer (heating takes minutes). The watcher then announces it as
+  `print_started` with `adopted: true`.
 - **The end**: the workers stay `--grace` seconds (default 300; the end-of-print events, the bed check, a print that
   starts again), then `systemctl --user stop` removes them completely: no ONNX model in memory, no sockets, no timers,
-  no heartbeat file. `--grace 0` stops at the first poll without a print.
-- **Printer unreachable**: retried with backoff (30 s, 60 s, then every 2 min), one journal line when it goes away and
-  one when it is back; workers are never started for it. A printer that disappears during a print counts like an ended
-  print (the grace period applies; the watcher alerts about the lost connection meanwhile).
-- **Supervisor restart** (update, crash, watchdog): the workers are separate units and are left alone. At start it
-  reconciles: a print already running starts them (if they are down); an idle printer whose workers still run gets one
-  fresh grace period.
-- **Wedged supervisor**: `WatchdogSec=600`; systemd restarts it. There is no heartbeat file: `systemctl --user show -p
-  StatusText 3d-printer-ondemand@NAME` says `printer=idle|printing|unreachable phase=idle|active|grace polled=<epoch>`.
-- **A worker that dies or is stopped by hand during a print** is started again at the next poll.
-- **A worker started by hand while the printer is idle** (or by a mount-retry timer) is found by the supervisor's stray
-  look, one `systemctl is-active` every 20 polls (10 minutes by default), and stopped after one grace period: an idle
-  printer never keeps workers running by accident.
+  no heartbeat file. `--grace 0` stops at the first check without a print.
+- **Printer unreachable**: retried at the next tick once, then every 2 minutes (a deadline in the state file, so it holds
+  for any timer interval; the timer keeps firing and the check exits at once in between, writing nothing; the state
+  file is rewritten once per ask while the printer stays off); one journal line when it goes away and one when it is
+  back; workers are never started for it. A printer that disappears during a print counts like an ended print
+  (the grace period applies at every tick; the watcher alerts about the lost connection meanwhile).
+- **Reboot, or the timer restarted**: the workers are separate units and nothing else tracks them. After a reboot the
+  state file and the workers are both gone; a print already running starts them at the first check. A missing state
+  file while workers run (the runtime directory was cleaned, or someone started them) gives them one fresh grace
+  period.
+- **A broken timer or check** shows in `supervise status`: the timer must be active and enabled, and the time of the last
+  check is when the check *service* last became inactive (`InactiveEnterTimestampMonotonic`, numeric on every systemd
+  version), never the timer's trigger, which also fires while the check crashes. A check that failed at its last run
+  (`check=failed`) and a printer configuration the check cannot read (`config=unreadable`, also before the first
+  successful check) are findings; the latter is logged once. A printer that the check's own context refuses
+  (`config=refused`: the unit sees another fleet, config directory or checkout than your shell) is a finding too.
+- **The backups disk is missing** (the checkout lives on a bind mount of it): the check service has
+  `ConditionPathExists=` on the checkout, so every tick is skipped silently, not failed; the timer keeps running and the
+  checks resume when the disk is back.
+- **A worker that dies or is stopped by hand during a print** is started again at the next check.
+- **A worker started by hand while the printer is idle** (or by a mount-retry timer) is found by the stray look, one
+  `systemctl is-active` on about one check in twenty (every ~10 minutes at the 30 s interval, chosen at random so it
+  works for any interval), and stopped after one grace period: an idle printer
+  never keeps workers running by accident.
 - **Bed monitor**: the watcher's camera bed monitor (`watch.bed.enabled`) only runs while the watcher does, i.e. during
   the print and the grace period; `3d printer bed status` and the start gate still take a fresh reading on demand.
   Raise the grace period when you want `bed_clear` events for longer.
-- **Timing**: `--poll S` / `--grace S`, or a drop-in so the unit keeps its shipped command:
-  `systemctl --user edit 3d-printer-ondemand@k1se` with `[Service]` `Environment=THREED_ONDEMAND_GRACE_S=900`
-  (`THREED_ONDEMAND_POLL_S` likewise).
+- **Timing**: the check interval is the timer's: `systemctl --user edit 3d-printer-ondemand@k1se.timer` with
+  `[Timer]` `OnActiveSec=` (an empty assignment resets *every* timer setting), `OnActiveSec=5s` and
+  `OnUnitInactiveSec=10s`; without the reset the new interval is added next to the shipped 30 s. A shorter interval
+  starts the workers sooner; a longer one delays them by as much, and `supervise status` judges with the 30 s (see above). The grace period is a drop-in on the service so the unit keeps its shipped command:
+  `systemctl --user edit 3d-printer-ondemand@k1se.service` with `[Service]` `Environment=THREED_ONDEMAND_GRACE_S=900`
+  (read at every check, so it applies at the next one: the only lasting setting; `--grace S` on a hand-run applies to that one check only,
+  the next timer check computes the deadline from the drop-in again).
 - **The workers have no `[Install]` section**: nothing starts them at boot, and `systemctl enable` on one is refused.
-  They carry `SuccessExitStatus=143`: the supervisor stops them with SIGTERM and `uv run`, the vision launcher, answers
+  They carry `SuccessExitStatus=143`: the check stops them with SIGTERM and `uv run`, the vision launcher, answers
   143; without it every stop would leave the unit `failed` and run the failure hook.
-  `supervise install` enables the supervisor and *disables* (never stops: a print may be running) workers an older
-  always-on install left enabled; the supervisor stops those after the grace period. `supervise uninstall` disables
-  the supervisor and stops the workers.
-- **`supervise status` / the doctor**: the supervisor must run; a stopped worker is the right state while the printer
-  is idle, off or unreachable and a FAIL while it prints (a WARN for the first 45 s after the supervisor's last poll,
-  which is its start lag).
+  `supervise install` enables the timer and *disables* (never stops: a print may be running) workers an older
+  always-on install left enabled; the check stops those after the grace period. It also retires the long-lived
+  `3d-printer-ondemand@NAME.service` process of the first #747 design (`disable --now`; its workers keep running and
+  are adopted by the first check). `supervise uninstall` disables the timer and stops the workers.
+- **`supervise status` / the doctor**: the timer must be active and enabled; a stopped worker is the right state while
+  the printer is idle, off or unreachable and a FAIL while it prints (a WARN for the first 45 s after the last
+  completed check, which is the start lag). The thresholds assume the shipped 30 s interval: with a longer one the
+  start lag outlasts the 45 s and a print that has just begun is judged a FAIL until the next check.
 
 ```bash
 3d printer ondemand u1 --once    # {"print_active": false, "workers": {...}, "would": "nothing"}; changes nothing
-systemctl --user show -p StatusText 3d-printer-ondemand@u1
+cat "$XDG_RUNTIME_DIR/3d-cli/ondemand/u1.json"    # what the last check saw (phase, seen, fails, error)
+systemctl --user list-timers '3d-printer-ondemand@*'
 ```
 
 ### What runs while a print runs
@@ -731,23 +766,26 @@ systemctl --user show -p StatusText 3d-printer-ondemand@u1
 | `3d-printer-watch@NAME` (systemd user unit, on demand) | websocket to the printer (Moonraker, creality-stock ws:9999): errors, pauses, progress, `print_started`; waits for a printer that is off (retries every ≤ 30 s, silent) | the printer's own API | Home Assistant, an omp session, a login |
 | `3d-printer-vision@NAME` (only with a camera, on demand) | polls the printer's state, fetches camera frames only while it prints, resets the per-print baselines at every print start, finds spaghetti / a detached part | the printer's own camera URL (`watch.vision.camera`) | Home Assistant, go2rtc, an omp session |
 | the alert chain, inside both workers | live omp subscriber → temporary omp agent → `tg` → autonomous pause (`watch.pause_without_agent`: once per job, only PAUSE, never resume or cancel) | `tg`; `tmux`+`omp` for the agent | Home Assistant |
-| `loginctl enable-linger` | the supervisor starts at boot and survives logout | — | — |
+| `loginctl enable-linger` | the supervisor timer starts at boot and survives logout | — | — |
 
 The units are generated from `fleet/printers.yaml`: every printer with `owner: own`, `access: full` and an adapter with
-a watch stream (`moonraker`, `creality-stock`) gets a supervisor and a watch unit, and a vision unit when `watch.vision.camera` (or its
+a watch stream (`moonraker`, `creality-stock`) gets a supervisor timer (with its one-shot check service) and a watch unit, and a vision unit when `watch.vision.camera` (or its
 model's default) exists. The workers carry no `--dry-run` (a service holding its alerts is the 2026-10-22 incident), have
 `Restart=always` with `StartLimitIntervalSec=0` (a crash loop never gives up), `After=network-online.target
 hsw-observer-agent.service` (ordering only — no `Wants=`, so nothing depends on that session; a drop-in with
-`Wants=hsw-observer-agent.service` keeps working); only the supervisor has `WantedBy=default.target`.
+`Wants=hsw-observer-agent.service` keeps working); only the supervisor timer has an `[Install]` section (`WantedBy=timers.target`).
 
 ```bash
 3d printer supervise install --all --plan   # what it would do, changes nothing
-3d printer supervise install --all --yes    # templates, daemon-reload, enable --now the supervisors, enable-linger
+3d printer supervise install --all --yes    # templates, daemon-reload, enable --now the timers, enable-linger
 3d printer supervise status                 # exit 1 (FAIL) when a printing/answering printer is unsupervised
 3d printer supervise status u1 --json
 3d printer supervise uninstall k1se --yes
 3d printers doctor --check printer-supervision [--fix --yes]
 ```
+
+After updating the checkout (`git pull`) run `supervise install --all --yes` again: an older unit file still runs the first design's resident supervisor,
+which the one-shot check cannot serve (systemd restarts it every 30 s until the install replaces the unit).
 
 `install` never touches a file you made without `--yes`: a hand-made `3d-printer-watch@.service` (for example the
 `--dry-run` one), and a `ConditionPathExists=!…intentional-off` drop-in, are listed as `[needs --yes]`, nothing at all
@@ -793,15 +831,15 @@ state that was not a job in between). The automatic pause binds the job from the
 
 ### Liveness
 
-The supervisor writes nothing (systemd's `StatusText` and watchdog, see above). While a print runs each worker writes a heartbeat: `watch/NAME.json` every 15 s (`last_poll_ok`, `unreachable_since`, `job`, `quiet` per
+The supervisor timer and its one-shot check write nothing while idle (only the RAM state file on a change, see above). While a print runs each worker writes a heartbeat: `watch/NAME.json` every 15 s (`last_poll_ok`, `unreachable_since`, `job`, `quiet` per
 printer) and `vision/NAME.json` every cycle (`ts`, `last_poll_ok`, `reachable`, `last_frame_ts`, `supervising`, `job`).
 `supervise status` and the doctor check `printer-supervision` FAIL when a printer that **answers** (printing or idle)
-has a missing/stopped supervisor, or is printing and a worker is missing/stopped, a heartbeat older than 75 s (watch) or max(90 s, 4 cycles) (vision), a watcher that is
+has a missing/inactive supervisor timer, or is printing and a worker is missing/stopped, a heartbeat older than 75 s (watch) or max(90 s, 4 cycles) (vision), a watcher that is
 disconnected for over 2 min from a printer that answers us, no camera frame for 3 min while a print is supervised,
 two watchers for one printer, a `--dry-run` unit, or linger off. The same gaps on a printer that does not answer are
 warnings: nothing is being missed, but the next print would be.
 
-If a supervisor dies while a print runs the user gets **one** short `tg` line and systemd restarts it
+If a worker dies while a print runs the user gets **one** short `tg` line and systemd restarts it
 (`Restart=always`). The units run `3d printer supervise notify-failure NAME KIND` as `ExecStopPost=`: systemd never
 puts a `Restart=always` unit into the `failed` state, so `OnFailure=` would never fire, while `ExecStopPost=` runs after
 every exit. The hook is silent for a clean stop (`SERVICE_RESULT=success`, `systemctl restart`), silent when the

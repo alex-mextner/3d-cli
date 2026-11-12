@@ -25,6 +25,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from printer_ops.unit_names import CHECK, SUPERVISOR, unit_name
+
 SERVICES = ("vision", "watch")  # 3d-printer-<kind>@NAME.service
 RUNNING = frozenset({"active", "activating", "reloading"})
 # What `systemctl --user show` returns for a unit; injected in tests.
@@ -67,9 +69,9 @@ def systemctl_show(unit: str) -> str:
     if shutil.which("systemctl") is None:
         return ""
     r = subprocess.run(
-        ["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
-         "-p", "UnitFileState", "-p", "NRestarts", "-p", "ActiveEnterTimestamp",
-         "-p", "ExecStart", "-p", "EnvironmentFiles", "-p", "StatusText"],
+        ["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState",
+         "-p", "SubState", "-p", "UnitFileState", "-p", "NRestarts", "-p", "ActiveEnterTimestamp",
+         "-p", "InactiveEnterTimestampMonotonic", "-p", "ActiveEnterTimestampMonotonic", "-p", "ExecStart", "-p", "EnvironmentFiles", "-p", "StatusText"],
         capture_output=True, text=True, timeout=15, check=False,
     )
     return r.stdout if r.returncode == 0 else ""
@@ -130,13 +132,19 @@ def check_printer(name: str, has_camera: bool, show: Show,
     verdict.units = [check_unit(f"3d-printer-{kind}@{name}.service", show, read) for kind in SERVICES]
     by = dict(zip(SERVICES, verdict.units, strict=True))
     if not by["vision"].running:
-        # #747: the vision unit exists only while a print runs; its supervisor being up is the expected idle state
-        supervisor = check_unit(f"3d-printer-ondemand@{name}.service", show, read)
+        # #747: the vision unit exists only while a print runs; its supervisor timer being armed is the expected idle state
+        supervisor = check_unit(unit_name(SUPERVISOR, name), show, read)
         if not supervisor.running:
             verdict.warnings.append(
                 f"no running vision service and no running supervisor: nothing watches {name}'s camera "
                 f"(3d-printer-vision@{name}.service is {by['vision'].state}, "
-                f"3d-printer-ondemand@{name}.service is {supervisor.state})")
+                f"{unit_name(SUPERVISOR, name)} is {supervisor.state})")
+        else:  # an armed timer whose one-shot service fails or is missing starts nothing
+            check = check_unit(unit_name(CHECK, name), show, read)
+            if check.state in ("failed", "not-found"):
+                verdict.warnings.append(
+                    f"the supervisor timer runs but its check service {unit_name(CHECK, name)} is {check.state}: "
+                    f"nothing can start the workers for {name}'s camera")
     return verdict
 
 

@@ -41,15 +41,17 @@ n1:
 
 SYSTEMCTL = """#!/bin/sh
 # fake `systemctl --user ...`: $FAKE_SYSTEMD/<unit> holds the unit's `show` text once it was enabled; enabling
-# the supervisor (`ondemand`) also makes the on-demand workers exist, stopped, as systemd would show them
+# the supervisor timer (`ondemand`) also makes the on-demand workers exist, stopped, as systemd would show them
 [ "$1" = "--user" ] && shift
 case "$1" in
   show)
-    unit="$2"
+    unit="$2"; [ "$unit" = "--timestamp=unix" ] && unit="$3"
     if [ -f "$FAKE_SYSTEMD/$unit" ]; then cat "$FAKE_SYSTEMD/$unit"; else printf 'LoadState=not-found\\nActiveState=inactive\\n'; fi ;;
   enable)
     unit="$3"; kind=$(echo "$unit" | cut -d- -f3 | cut -d@ -f1); name=$(echo "$unit" | cut -d@ -f2 | cut -d. -f1)
-    printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nUnitFileState=enabled\\nNRestarts=0\\nStatusText=printer=idle phase=idle polled=%s\\nExecStart={ path=/x ; argv[]=/x printer %s %s ; ignore_errors=no ; pid=1 }\\nEnvironmentFiles=\\n' "$(date +%s)" "$kind" "$name" > "$FAKE_SYSTEMD/$unit"
+    printf 'LoadState=loaded\\nActiveState=active\\nSubState=waiting\\nUnitFileState=enabled\\nNRestarts=0\\nLastTriggerUSec=@%s\\nEnvironmentFiles=\\n' "$(date +%s)" > "$FAKE_SYSTEMD/$unit"
+    up=$(cut -d. -f1 /proc/uptime)
+    printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=static\\nInactiveEnterTimestampMonotonic=%s\\n' "$((up * 1000000))" > "$FAKE_SYSTEMD/3d-printer-ondemand@$name.service"
     for worker in watch vision; do
       printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=static\\nNRestarts=0\\nExecStart={ path=/x ; argv[]=/x printer %s %s ; ignore_errors=no ; pid=0 }\\nEnvironmentFiles=\\n' "$worker" "$name" > "$FAKE_SYSTEMD/3d-printer-$worker@$name.service"
     done ;;
@@ -90,6 +92,7 @@ def lab(tmp_path: Path) -> Lab:
         XDG_CONFIG_HOME=str(tmp_path / "config"),
         XDG_STATE_HOME=str(tmp_path / "state"),
         XDG_CACHE_HOME=str(tmp_path / "cache"),
+        XDG_RUNTIME_DIR=str(tmp_path / "run"),
         FAKE_SYSTEMD=str(fake),
     )
     return Lab(env, tmp_path, fake, tmp_path / "units")
@@ -156,16 +159,23 @@ def test_install_then_status_through_the_real_cli(lab: Lab) -> None:
     calls = (lab.fake / "calls.log").read_text()
     assert (
         "daemon-reload" in calls
-        and "enable --now 3d-printer-ondemand@p1.service" in calls
+        and "enable --now 3d-printer-ondemand@p1.timer" in calls
         and "enable --now 3d-printer-watch@p1.service" not in calls
         and "enable --now 3d-printer-vision@p1.service" not in calls
     )
 
-    # the supervisor says the printer idles (no printer asked): the stopped workers are the right state
+    # the timer's last one-shot check saw the printer idle (it leaves that in its RAM state file; no printer is
+    # asked here): the stopped workers are the right state
+    run_dir = lab.cwd / "run" / "3d-cli" / "ondemand"
+    run_dir.mkdir(parents=True)
+    (run_dir / "p1.json").write_text(
+        json.dumps({"v": 1, "phase": "idle", "seen": "idle", "fails": 0, "error": ""})
+    )
     status = threed(lab, "status", "--no-live", "--json", "--unit-dir", units)
     assert status.returncode == 0, status.stderr
     doc = json.loads(status.stdout)
     assert doc[0]["printer"] == "p1" and doc[0]["level"] == "ok"
+    assert doc[0]["printer_state"] == "idle"  # from the last check's state file, no printer asked
     assert doc[0]["units"]["ondemand"]["active"] == "active"
     assert doc[0]["units"]["watch"]["active"] == "inactive"
 

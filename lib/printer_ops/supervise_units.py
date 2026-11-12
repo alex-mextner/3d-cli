@@ -1,27 +1,31 @@
-"""supervise_units.py — the systemd user units of the always-on printer supervision, shipped from the repo.
+"""supervise_units.py — the systemd user units of the on-demand printer supervision, shipped from the repo.
 
-WHAT: renders the unit TEMPLATES `3d-printer-ondemand@.service` (the tiny always-on supervisor,
-  printer_ops/ondemand.py), `3d-printer-watch@.service` and `3d-printer-vision@.service` (the camera loop;
-  the heavy WORKERS) and plans/applies their installation for every OWNED, fully controlled fleet printer
-  (fleet/printers.yaml: owner own, access full, an adapter with a watch stream; vision only when a
-  camera is configured). `3d printer supervise install|uninstall` (supervise.py) drives this module.
+WHAT: renders the unit TEMPLATES `3d-printer-ondemand@.timer` (the supervisor: a timer, no process between
+  checks), `3d-printer-ondemand@.service` (the one-shot check the timer runs, printer_ops/ondemand.py),
+  `3d-printer-watch@.service` and `3d-printer-vision@.service` (the camera loop; the heavy WORKERS) and
+  plans/applies their installation for every OWNED, fully controlled fleet printer (fleet/printers.yaml: owner
+  own, access full, an adapter with a watch stream; vision only when a camera is configured). Unit and
+  template names live in unit_names.py. `3d printer supervise install|uninstall` (supervise.py) drives this
+  module.
 
 WHY (#639): before this module the units were hand-made: templates ending in `--dry-run` plus per-printer
   drop-ins nobody could recreate, and k1se carried an `intentional-off.conf` gate that kept both units
   stopped while a marker file existed (#640), so a printer switched on again was unwatched.
-WHY ON DEMAND (#747): always-on workers held 1.7 GiB and 4.6 % of a core while nothing printed. Only the
-  supervisor is enabled and always up (~18 MB, one tiny request per 30 s); it starts the workers when a print
-  runs and stops them after it. The worker templates therefore have NO `[Install]` section: nothing starts
-  them at boot, and a stray `systemctl enable` is refused instead of silently reviving the always-on mode.
+WHY ON DEMAND (#747): always-on workers held 1.7 GiB and 4.6 % of a core while nothing printed, and the first
+  fix still kept one resident supervisor process per printer. Now only a TIMER per printer is armed (systemd
+  holds it, no process): every 30 s it runs a ~20 ms one-shot check that starts the workers when a print runs
+  and stops them after it. The worker templates have NO `[Install]` section: nothing starts them at boot, and
+  a stray `systemctl enable` is refused instead of silently reviving the always-on mode.
 
-THE UNITS: no `--dry-run`, `Restart=always`, `StartLimitIntervalSec=0` (a crash loop never gives up),
-  the supervisor `WantedBy=default.target` (with `loginctl enable-linger` it starts at boot without a login)
-  as `Type=notify` with a watchdog (a wedged supervisor is restarted by systemd, no heartbeat file),
-  ordered `After=network-online.target hsw-observer-agent.service` (workers; ordering only: no Wants, no
-  dependency on Home Assistant or an omp session; a hand-made drop-in with Wants= keeps working), and the
-  workers' `ExecStopPost=-... supervise notify-failure` — systemd never puts a `Restart=always` unit into the
-  `failed` state, so OnFailure= would never fire; ExecStopPost runs after EVERY exit and the handler stays
-  silent for a clean stop (SERVICE_RESULT=success), which is what the supervisor's `systemctl stop` is (#642).
+THE UNITS: no `--dry-run`, workers `Restart=always`, `StartLimitIntervalSec=0` (a crash loop never gives up),
+  the supervisor timer `WantedBy=timers.target` (with `loginctl enable-linger` it starts at boot without a
+  login), the check `Type=oneshot` with no `[Install]` and `LogLevelMax=notice` (no Starting/Finished journal
+  lines every 30 s), the workers ordered `After=network-online.target hsw-observer-agent.service` (ordering
+  only: no Wants, no dependency on Home Assistant or an omp session; a hand-made drop-in with Wants= keeps
+  working), and the workers' `ExecStopPost=-... supervise notify-failure` — systemd never puts a
+  `Restart=always` unit into the `failed` state, so OnFailure= would never fire; ExecStopPost runs after EVERY
+  exit and the handler stays silent for a clean stop (SERVICE_RESULT=success), which is what the check's
+  `systemctl stop` is (#642).
 
 OWNERSHIP: a file whose first line is MANAGED_MARK is ours: it is rewritten freely. A hand-made file with
   the same name is replaced only with `--yes`, after a `.bak-<time>` copy next to it. Drop-ins are never
@@ -45,18 +49,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from printer_ops.unit_names import (
+    CHECK,
+    KINDS,
+    RUNNING,
+    SUPERVISOR,
+    TEMPLATE_KINDS,
+    template_name,
+    unit_name,
+)
+
 if TYPE_CHECKING:
     from printops.fleet import Fleet
 
 MANAGED_MARK = (
     "# managed-by: 3d printer supervise install (do not edit; override with a drop-in)"
 )
-KINDS = ("watch", "vision")  # the workers
-SUPERVISOR = "ondemand"  # the always-on unit that starts and stops them
-TEMPLATE_KINDS = (SUPERVISOR, *KINDS)
 WATCH_ADAPTERS = frozenset({"moonraker", "creality-stock"})
-RESTART_SEC = {"watch": 15, "vision": 30, SUPERVISOR: 30}
-RUNNING = frozenset({"active", "activating", "reloading"})
+RESTART_SEC = {"watch": 15, "vision": 30}
+CHECK_INTERVAL_S = 30  # the timer's OnUnitInactiveSec
 
 # A systemctl/loginctl call: argv -> CompletedProcess. The default refuses to run under pytest.
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
@@ -68,14 +79,6 @@ def real_runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv), capture_output=True, text=True, timeout=60, check=False
     )
-
-
-def unit_name(kind: str, printer: str) -> str:
-    return f"3d-printer-{kind}@{printer}.service"
-
-
-def template_name(kind: str) -> str:
-    return f"3d-printer-{kind}@.service"
 
 
 def default_unit_dir() -> Path:
@@ -157,10 +160,11 @@ class Layout:
         )
 
     def exec_argv(self, kind: str) -> list[str]:
-        if kind == SUPERVISOR:
-            # `-m` with PYTHONPATH, not bin/3d: the dispatcher imports every command module (~35 MB), the
-            # supervisor must stay near 18 MB (#747).
-            return [str(self.python), "-m", "printer_ops.ondemand", "%i"]
+        if kind == CHECK:
+            # `-S -m` with PYTHONPATH, not bin/3d: the dispatcher imports every command module (~35 MB and
+            # ~0.4 s), the check runs every 30 s and must cost milliseconds (#747). `-S`: no site import
+            # (the check is stdlib only).
+            return [str(self.python), "-S", "-m", "printer_ops.ondemand", "%i"]
         return [
             str(self.python),
             str(self.repo / "bin" / "3d"),
@@ -182,44 +186,59 @@ class Layout:
 
 
 DESCRIPTIONS = {
-    "ondemand": "3D printer supervisor %i (always on, tiny: starts the watch and vision workers only while a print runs)",
+    SUPERVISOR: "3D printer supervisor %i (a timer: every 30 s a one-shot check, no process in between; starts the watch and vision workers only while a print runs)",
+    CHECK: "3D printer on-demand check %i (one-shot: asks the printer, starts or stops the watch and vision workers)",
     "watch": "3D printer watch %i (while a print runs: Klipper state, errors, pauses; AI alerts + auto pause)",
     "vision": "3D printer vision %i (while a print runs: camera frames, spaghetti / detached part; AI alerts + auto pause)",
 }
+_ONDEMAND_DOC = "https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md#on-demand-supervision-747"
 DOCS = {
-    "ondemand": "https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md#on-demand-supervision-747",
+    SUPERVISOR: _ONDEMAND_DOC,
+    CHECK: _ONDEMAND_DOC,
     "watch": "https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md#always-on-supervision",
     "vision": "https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer-vision.md",
 }
 
 
-def _supervisor_service(layout: Layout, pin: str) -> str:
-    """[Service] and [Install] of the supervisor: notify + watchdog (no heartbeat file), no ExecStopPost (a
-    dead supervisor leaves the workers running, and systemd restarts it), a memory cap above the resolver
-    child's peak (~30 MB) and the supervisor's own ~18 MB."""
+def _timer_section() -> str:
+    """[Timer] and [Install] of the supervisor: the first check 5 s after the timer is armed (boot, install),
+    then 30 s after the previous check FINISHED (so a slow printer never stacks checks). AccuracySec=1s keeps
+    wake-ups from being coalesced into minutes."""
+    return f"""[Timer]
+OnActiveSec=5s
+OnUnitInactiveSec={CHECK_INTERVAL_S}s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def _check_service(layout: Layout, pin: str) -> str:
+    """[Service] of the one-shot check the timer starts: no [Install] (only the timer starts it), no Restart
+    (the timer is the retry), `LogLevelMax=notice` + `SyslogLevel=notice` so systemd's own Starting/Finished
+    lines (info) are not written to the journal every 30 s while the check's real transition lines (stdout at
+    notice) are, and a memory cap above the config resolver's peak (~30 MB), which runs only after a config
+    change."""
     return f"""[Service]
-Type=notify
-WatchdogSec=600
+Type=oneshot
+LogLevelMax=notice
+SyslogLevel=notice
 Environment=PATH={layout.repo}/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONPATH={layout.repo}/lib
 Environment=PYTHONUNBUFFERED=1
 {pin}WorkingDirectory={layout.repo}
 UMask=0077
 MemoryMax=96M
-ExecStart={shlex.join(layout.exec_argv(SUPERVISOR))}
-Restart=always
-RestartSec={RESTART_SEC[SUPERVISOR]}
-TimeoutStopSec=15
-
-[Install]
-WantedBy=default.target
+TimeoutStartSec=90
+ExecStart={shlex.join(layout.exec_argv(CHECK))}
 """
 
 
 def _worker_service(kind: str, layout: Layout, pin: str) -> str:
-    """[Service] of a worker: started and stopped by the supervisor, so no [Install] section. SuccessExitStatus=143:
-    the supervisor stops it with SIGTERM and `uv run` (the vision loop's launcher) answers with 143; without it
-    every stop would leave the unit `failed` and run the failure hook (#747)."""
+    """[Service] of a worker: started and stopped by the on-demand check, so no [Install] section.
+    SuccessExitStatus=143: the check stops it with SIGTERM and `uv run` (the vision loop's launcher) answers
+    with 143; without it every stop would leave the unit `failed` and run the failure hook (#747)."""
     return f"""[Service]
 Type=simple
 Environment=PATH={layout.repo}/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
@@ -235,7 +254,8 @@ SuccessExitStatus=143
 
 
 def render_template(kind: str, layout: Layout) -> str:
-    """The text of `3d-printer-KIND@.service`; deterministic for a given layout (snapshot-tested)."""
+    """The text of the unit file of `kind` (see unit_names.TEMPLATES); deterministic for a given layout
+    (snapshot-tested)."""
     if kind not in TEMPLATE_KINDS:
         raise ValueError(f"unknown supervision unit kind {kind!r}")
     pin = (
@@ -243,24 +263,22 @@ def render_template(kind: str, layout: Layout) -> str:
         if layout.xdg_config
         else ""
     )
-    after = (
-        "network-online.target"
-        if kind == SUPERVISOR
-        else "network-online.target hsw-observer-agent.service"
-    )
-    service = (
-        _supervisor_service(layout, pin)
-        if kind == SUPERVISOR
-        else _worker_service(kind, layout, pin)
-    )
+    if kind == SUPERVISOR:
+        body, unit_extra = _timer_section(), ""
+    elif kind == CHECK:
+        # the checkout lives under a bind mount of the backups disk: without the disk the check is skipped
+        # silently (an unmet Condition is not a failure and logs below notice) instead of failing every 30 s
+        body = _check_service(layout, pin)
+        unit_extra = f"ConditionPathExists={layout.repo}/lib/printer_ops/ondemand.py\n"
+    else:
+        body = _worker_service(kind, layout, pin)
+        unit_extra = "After=network-online.target hsw-observer-agent.service\nStartLimitIntervalSec=0\n"
     return f"""{MANAGED_MARK}
 [Unit]
 Description={DESCRIPTIONS[kind]}
 Documentation={DOCS[kind]}
-After={after}
-StartLimitIntervalSec=0
-
-{service}"""
+{unit_extra}
+{body}"""
 
 
 # ---- what is on disk ---------------------------------------------------------------------------
@@ -347,30 +365,51 @@ def classify_dropin(path: Path, text: str, canonical: list[str]) -> DropIn:
     return DropIn(path, "other", "other directives (kept)")
 
 
-def find_dropins(
-    unit_dir: Path, plans: Sequence[PrinterPlan], layout: Layout
-) -> list[DropIn]:
-    """Every `*.conf` drop-in of the supervision templates and instances, classified."""
-    found: list[DropIn] = []
-    dirs: list[tuple[Path, str, str]] = [
+def _dropin_dirs(
+    unit_dir: Path, plans: Sequence[PrinterPlan]
+) -> list[tuple[Path, str, str]]:
+    """(drop-in directory, unit kind, instance) of every template and every printer's instance."""
+    dirs = [
         (unit_dir / f"{template_name(kind)}.d", kind, "%i") for kind in TEMPLATE_KINDS
     ]
     dirs.extend(
         (unit_dir / f"{unit_name(kind, plan.name)}.d", kind, plan.name)
         for plan in plans
-        for kind in (*plan.kinds, SUPERVISOR)
+        for kind in (*plan.kinds, SUPERVISOR, CHECK)
     )
-    for directory, kind, instance in dirs:
-        if not directory.is_dir():
+    return dirs
+
+
+def _classify_dir(
+    directory: Path, kind: str, instance: str, layout: Layout
+) -> list[DropIn]:
+    """The classified `*.conf` files of one drop-in directory (a timer has no ExecStart to compare against)."""
+    if not directory.is_dir():
+        return []
+    canonical = (
+        []
+        if kind == SUPERVISOR
+        else [a.replace("%i", instance) for a in layout.exec_argv(kind)]
+    )
+    found: list[DropIn] = []
+    for conf in sorted(directory.glob("*.conf")):
+        try:
+            text = conf.read_text(encoding="utf-8")
+        except OSError:
             continue
-        canonical = [a.replace("%i", instance) for a in layout.exec_argv(kind)]
-        for conf in sorted(directory.glob("*.conf")):
-            try:
-                text = conf.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            found.append(classify_dropin(conf, text, canonical))
+        found.append(classify_dropin(conf, text, canonical))
     return found
+
+
+def find_dropins(
+    unit_dir: Path, plans: Sequence[PrinterPlan], layout: Layout
+) -> list[DropIn]:
+    """Every `*.conf` drop-in of the supervision templates and instances, classified."""
+    return [
+        d
+        for directory, kind, instance in _dropin_dirs(unit_dir, plans)
+        for d in _classify_dir(directory, kind, instance, layout)
+    ]
 
 
 # ---- install plan ------------------------------------------------------------------------------
@@ -424,24 +463,40 @@ def _template_actions(
     plans: Sequence[PrinterPlan], layout: Layout, installed: dict[str, str], now: float
 ) -> list[Action]:
     kinds = sorted(
-        {SUPERVISOR, *(k for p in plans for k in p.kinds)}, key=TEMPLATE_KINDS.index
+        {SUPERVISOR, CHECK, *(k for p in plans for k in p.kinds)},
+        key=TEMPLATE_KINDS.index,
     )
     found = (_template_action(kind, layout, installed, now) for kind in kinds)
     return [action for action in found if action is not None]
 
 
-def _plan_enable_actions(plan: PrinterPlan, enabled: dict[str, bool]) -> list[Action]:
-    """The supervisor is enabled and started when it is not (enabled AND running); a worker that an older
-    install left enabled is DISABLED, never stopped (a print may be running: the supervisor stops it after its
-    grace period)."""
+def _plan_enable_actions(
+    plan: PrinterPlan, enabled: dict[str, bool], old_supervisors: set[str]
+) -> list[Action]:
+    """A leftover always-on supervisor (the long-lived `3d-printer-ondemand@NAME.service` of the first #747
+    design) is stopped and disabled first: its workers are left running, the next check adopts them. The timer
+    supervisor is enabled and started when it is not (enabled AND running); a worker that an older install
+    left enabled is DISABLED, never stopped (a print may be running: the check stops it after its grace
+    period)."""
     supervisor = plan.supervisor_unit()
     actions: list[Action] = []
+    old = unit_name(CHECK, plan.name)
+    if old in old_supervisors:
+        actions.append(
+            Action(
+                "disable",
+                old,
+                "retire the always-on supervisor process: the timer runs a one-shot check instead "
+                "(its workers keep running and are adopted)",
+                argv=["systemctl", "--user", "disable", "--now", old],
+            )
+        )
     if not enabled.get(supervisor, False):
         actions.append(
             Action(
                 "enable",
                 supervisor,
-                "enable and start the supervisor",
+                "enable and start the timer that runs the on-demand check",
                 argv=["systemctl", "--user", "enable", "--now", supervisor],
             )
         )
@@ -449,8 +504,8 @@ def _plan_enable_actions(plan: PrinterPlan, enabled: dict[str, bool]) -> list[Ac
         Action(
             "disable",
             unit,
-            "no longer always on: the supervisor starts it while a print runs (a running copy "
-            "is stopped by the supervisor after its grace period)",
+            "no longer always on: the check starts it while a print runs (a running copy "
+            "is stopped by the check after its grace period)",
             argv=["systemctl", "--user", "disable", unit],
         )
         for unit in plan.worker_units()
@@ -460,12 +515,20 @@ def _plan_enable_actions(plan: PrinterPlan, enabled: dict[str, bool]) -> list[Ac
 
 
 def _enable_actions(
-    plans: Sequence[PrinterPlan], enabled: dict[str, bool], loaded_dry_run: set[str]
+    plans: Sequence[PrinterPlan],
+    enabled: dict[str, bool],
+    loaded_dry_run: set[str],
+    old_supervisors: set[str],
 ) -> list[Action]:
-    """Per printer: enable the supervisor, disable always-on workers; then restart every unit whose running
-    definition still has --dry-run. `enabled` says "enabled" for a worker and "enabled and running" for a
-    supervisor (a stopped supervisor is started again)."""
-    actions = [a for plan in plans for a in _plan_enable_actions(plan, enabled)]
+    """Per printer: retire an old always-on supervisor process, enable the timer, disable always-on workers;
+    then restart every unit whose running definition still has --dry-run. `enabled` says "enabled" for a worker
+    and "enabled and running" for the timer (a stopped timer is started again); `old_supervisors` are the
+    leftover long-lived supervisor services that are still enabled."""
+    actions = [
+        a
+        for plan in plans
+        for a in _plan_enable_actions(plan, enabled, old_supervisors)
+    ]
     actions.extend(
         Action(
             "restart",
@@ -489,10 +552,13 @@ def plan_install(
     enabled: dict[str, bool],
     loaded_dry_run: set[str],
     now: float,
+    old_supervisors: set[str] | None = None,
 ) -> list[Action]:
     """The ordered actions that make the supervision of `plans` right. `installed` is unit file name -> its text
     (missing = absent); `enabled` unit -> is enabled; `loaded_dry_run` the units whose RUNNING definition
-    still carries --dry-run. Pure: nothing is read or written here."""
+    still carries --dry-run; `old_supervisors` the still-enabled long-lived `3d-printer-ondemand@NAME.service`
+    instances of the first #747 design (retired in favour of the timer). Pure: nothing is read or written
+    here."""
     actions = _template_actions(plans, layout, installed, now)
     actions.extend(
         Action("retire", d.path.name, d.detail, needs_yes=True, path=d.path)
@@ -518,7 +584,9 @@ def plan_install(
                 argv=["loginctl", "enable-linger"],
             )
         )
-    actions.extend(_enable_actions(plans, enabled, loaded_dry_run))
+    actions.extend(
+        _enable_actions(plans, enabled, loaded_dry_run, old_supervisors or set())
+    )
     return actions
 
 
@@ -614,6 +682,70 @@ def _write_atomic(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+def _uninstall_actions(
+    plan: PrinterPlan,
+    enabled: dict[str, bool],
+    old_supervisors: set[str],
+    absent: set[str],
+) -> list[Action]:
+    """Per printer, in this order: the timer, then a check that is still running (it must not start a worker
+    after the uninstall returned), then the workers (an enabled leftover is disabled, an on-demand one is
+    stopped). A unit systemd has no file for (`absent`: an install of the first #747 design has no timer yet)
+    is skipped: `systemctl stop|disable` of it exits 5 and would fail the whole uninstall."""
+    timer = plan.supervisor_unit()
+    check = unit_name(CHECK, plan.name)
+    actions: list[Action] = []
+    if (
+        check in old_supervisors
+    ):  # the resident process of the first #747 design: its boot enablement too
+        actions.append(
+            Action(
+                "disable",
+                check,
+                "stop and disable the always-on supervisor process of the first design",
+                argv=["systemctl", "--user", "disable", "--now", check],
+            )
+        )
+    # unconditionally: a timer that is enabled but stopped, or running but not enabled (`disable` without
+    # `--now`), would otherwise survive, and a check in flight could still start workers
+    actions.append(
+        Action(
+            "disable",
+            timer,
+            "stop and disable the timer",
+            argv=["systemctl", "--user", "disable", "--now", timer],
+        )
+    )
+    actions.append(
+        Action(
+            "stop",
+            check,
+            "stop a check that is still running: it must not start workers after the uninstall",
+            argv=["systemctl", "--user", "stop", check],
+        )
+    )
+    for unit in plan.worker_units():
+        if enabled.get(unit, False):
+            actions.append(
+                Action(
+                    "disable",
+                    unit,
+                    "stop and disable",
+                    argv=["systemctl", "--user", "disable", "--now", unit],
+                )
+            )
+        else:  # on-demand workers are not enabled: only stop them
+            actions.append(
+                Action(
+                    "stop",
+                    unit,
+                    "stop the worker: nothing starts it any more",
+                    argv=["systemctl", "--user", "stop", unit],
+                )
+            )
+    return [a for a in actions if a.target not in absent]
+
+
 def plan_uninstall(
     plans: Sequence[PrinterPlan],
     layout: Layout,
@@ -621,32 +753,18 @@ def plan_uninstall(
     installed: dict[str, str],
     all_units: bool,
     enabled: dict[str, bool],
+    old_supervisors: set[str] | None = None,
+    absent: set[str] | None = None,
 ) -> list[Action]:
     """Disable the printers' instances; with `all_units` (no printer left to supervise) also remove the managed
     templates. A hand-made template is never removed here."""
-    actions: list[Action] = []
-    for plan in plans:
-        for unit in plan.units():
-            if enabled.get(unit, False):
-                actions.append(
-                    Action(
-                        "disable",
-                        unit,
-                        "stop and disable",
-                        argv=["systemctl", "--user", "disable", "--now", unit],
-                    )
-                )
-            elif (
-                unit in plan.worker_units()
-            ):  # on-demand workers are not enabled: only stop them
-                actions.append(
-                    Action(
-                        "stop",
-                        unit,
-                        "stop the worker: nothing starts it any more",
-                        argv=["systemctl", "--user", "stop", unit],
-                    )
-                )
+    actions = [
+        a
+        for plan in plans
+        for a in _uninstall_actions(
+            plan, enabled, old_supervisors or set(), absent or set()
+        )
+    ]
     if all_units:
         for kind in TEMPLATE_KINDS:
             name = template_name(kind)
@@ -684,7 +802,9 @@ def read_installed(unit_dir: Path) -> dict[str, str]:
 
 
 __all__ = [
+    "CHECK",
     "KINDS",
+    "RUNNING",
     "SUPERVISOR",
     "TEMPLATE_KINDS",
     "MANAGED_MARK",

@@ -153,7 +153,10 @@ def test_run_passes_for_a_delivering_deployment_and_json_is_machine_readable(
 
 def test_a_missing_vision_service_is_fine_while_the_on_demand_supervisor_runs() -> None:
     show = _systemd(
-        {"3d-printer-ondemand@u1.service": _show("-m printer_ops.ondemand u1")}
+        {
+            "3d-printer-ondemand@u1.timer": _show(""),
+            "3d-printer-ondemand@u1.service": _show("", state="inactive"),
+        }
     )
     v = dc.check_printer("u1", True, show)
     assert not v.failures and not v.warnings
@@ -162,16 +165,21 @@ def test_a_missing_vision_service_is_fine_while_the_on_demand_supervisor_runs() 
 def test_a_missing_vision_service_warns_when_the_supervisor_is_not_running_either() -> (
     None
 ):
-    stopped = _systemd(
-        {
-            "3d-printer-ondemand@u1.service": _show(
-                "-m printer_ops.ondemand u1", state="inactive"
-            )
-        }
-    )
+    stopped = _systemd({"3d-printer-ondemand@u1.timer": _show("", state="inactive")})
     v = dc.check_printer("u1", True, stopped)
     assert not v.failures
     assert (
         "no running vision service" in v.warnings[0]
-        and "3d-printer-ondemand@u1.service" in v.warnings[0]
+        and "3d-printer-ondemand@u1.timer" in v.warnings[0]
     )
+
+
+def test_an_armed_timer_whose_check_service_failed_or_is_missing_is_a_warning_not_a_pass() -> (
+    None
+):
+    for state in ("failed", "not-found"):
+        units = {"3d-printer-ondemand@u1.timer": _show("")}
+        if state == "failed":
+            units["3d-printer-ondemand@u1.service"] = _show("", state="failed")
+        v = dc.check_printer("u1", True, _systemd(units))
+        assert v.warnings and "check service" in v.warnings[0], state

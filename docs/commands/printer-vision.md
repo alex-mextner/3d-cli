@@ -466,7 +466,7 @@ camera `snapshot`, thresholds and `crop`; nothing in tier (b) is U1-specific.
 
 **Start here:** `3d printer supervise install --all --plan`, then `--yes` — see
 [Always-on supervision](printer.md#always-on-supervision): the vision unit runs only while a print does, started and
-stopped by the tiny `3d-printer-ondemand@NAME` supervisor ([#747](https://github.com/alex-mextner/3d-cli/issues/747),
+stopped by the one-shot check of the `3d-printer-ondemand@NAME` timer ([#747](https://github.com/alex-mextner/3d-cli/issues/747),
 [On-demand supervision](printer.md#on-demand-supervision-747)); a stopped vision unit on an idle printer is the right state. The loop polls the printer's state itself, so a print
 started from the touchscreen, Fluidd, a slicer upload, Home Assistant or a macro is supervised from its first poll; it
 resets the tracker and the detached-part baseline at each print start (also after a power cycle with the same file

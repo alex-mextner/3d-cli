@@ -594,6 +594,37 @@ def test_watch_units_fail_when_no_vision_service_runs_and_skip_without_systemctl
     assert res.status == "skip" and "no camera" in res.summary
 
 
+def test_a_failed_or_missing_check_service_gets_a_fix_that_is_not_enabling_the_running_timer() -> (
+    None
+):
+    timer = {"3d-printer-ondemand@p1.timer": _unit("printer ondemand p1")}
+    for check_state, expected in (
+        ("failed", "journalctl --user -u 3d-printer-ondemand@p1.service"),
+        ("not-found", "$ 3d printer supervise install p1 --yes"),
+        ("no-timer", "$ 3d printer supervise install p1 --yes"),
+    ):
+        show = _systemd(
+            {
+                **timer,
+                "3d-printer-ondemand@p1.service": _unit(
+                    "printer ondemand p1", check_state
+                ),
+            }
+        )
+        if check_state == "not-found":
+            show = _systemd(timer)
+        if check_state == "no-timer":
+            show = _systemd({})
+        r = rig(target(watch=CAMERA), systemctl_show=show)
+        rec = run_printer(
+            r.ctx, [CHECKS["watch-units-dry-run"]], Options(fix=True, yes=True)
+        ).records[0]
+        assert "3d-printer-ondemand@p1" in rec.result.summary, rec.result.summary
+        fix = rec.fix
+        assert fix is not None
+        assert any(expected in step for step in fix.manual_steps), fix.manual_steps
+
+
 # ---- device-override-stale ------------------------------------------------------------------
 
 

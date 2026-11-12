@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import io
 import shlex
+import time
 
 from printer_doctor.context import Context
 from printer_doctor.model import (
@@ -37,6 +38,7 @@ from printer_doctor.model import (
     Verdict,
     command,
 )
+from printer_ops import ondemand
 from printer_ops import supervise as sv
 from printer_ops.supervise_units import PrinterPlan
 
@@ -81,6 +83,7 @@ def _env(ctx: Context) -> sv.Env:
     plan = _plan(ctx)
     return sv.Env(
         plans=lambda: [plan] if plan is not None else [],
+        fleet=src.fleet or sv.discover_plans,
         show=ctx.systemctl_show,
         run=src.runner,
         state_dir=ctx.state_dir(),
@@ -88,6 +91,8 @@ def _env(ctx: Context) -> sv.Env:
         clock=ctx.now,
         state_probe=state,
         alive=src.alive or sv.pid_alive,
+        last_check=src.last_check or ondemand.read_status,
+        monotonic=src.monotonic or time.monotonic,
     )
 
 

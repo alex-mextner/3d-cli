@@ -17,6 +17,7 @@ from printer_doctor_fakes import device, fleet_printer
 from printer_supervise_fakes import (
     CAMERA,
     LAYOUT,
+    MONO,
     NOW,
     Runner,
     Systemd,
@@ -146,7 +147,7 @@ def test_plan_printers_takes_owned_full_access_printers_with_a_watch_adapter_and
         "3d-printer-watch@a.service",
         "3d-printer-vision@a.service",
     ]
-    assert plans[0].supervisor_unit() == "3d-printer-ondemand@a.service"
+    assert plans[0].supervisor_unit() == "3d-printer-ondemand@a.timer"
     assert plans[0].units() == [plans[0].supervisor_unit(), *plans[0].worker_units()]
 
 
@@ -182,12 +183,12 @@ def test_a_fresh_install_writes_the_templates_reloads_and_enables_every_unit(
     code, runner = run_install(tmp_path, Systemd(), "--all")
     assert code == 0
     units = tmp_path / "units"
-    for kind in ("ondemand", "watch", "vision"):
-        assert su.is_managed((units / f"3d-printer-{kind}@.service").read_text())
+    for kind in su.TEMPLATE_KINDS:
+        assert su.is_managed((units / su.template_name(kind)).read_text())
     systemctl = [c for c in runner.calls if c[0] == "systemctl"]
     assert systemctl == [
         ["systemctl", "--user", "daemon-reload"],
-        ["systemctl", "--user", "enable", "--now", "3d-printer-ondemand@p1.service"],
+        ["systemctl", "--user", "enable", "--now", "3d-printer-ondemand@p1.timer"],
     ]
     assert "check: 3d printer supervise status" in capsys.readouterr().out
 
@@ -202,7 +203,7 @@ def test_a_printer_without_a_camera_gets_no_vision_unit(tmp_path: Path) -> None:
         "--user",
         "enable",
         "--now",
-        "3d-printer-ondemand@p1.service",
+        "3d-printer-ondemand@p1.timer",
     ] in runner.calls
     assert not any("vision" in " ".join(c) for c in runner.calls)
     assert not any("watch" in " ".join(c) for c in runner.calls)
@@ -376,7 +377,7 @@ def test_uninstall_disables_units_and_removes_managed_templates_only_with_yes(
         "--user",
         "disable",
         "--now",
-        "3d-printer-ondemand@p1.service",
+        "3d-printer-ondemand@p1.timer",
     ] in runner.calls
 
 
@@ -544,11 +545,11 @@ def test_the_marker_no_longer_gates_anything_it_is_only_shown(
 
 
 def test_a_unit_held_by_a_gate_dropin_says_why(tmp_path: Path) -> None:
-    d = tmp_path / "units" / "3d-printer-ondemand@p1.service.d"
+    d = tmp_path / "units" / "3d-printer-ondemand@p1.timer.d"
     d.mkdir(parents=True)
     (d / "intentional-off.conf").write_text(GATE)
     systemd = Systemd(
-        {"3d-printer-ondemand@p1.service": unit_show("inactive", sub="dead")}
+        {"3d-printer-ondemand@p1.timer": unit_show("inactive", sub="dead")}
     )
     a = assess_status(tmp_path, systemd, state="idle", camera=False)
     texts = [f.text for f in a.findings]
@@ -559,7 +560,11 @@ def test_a_unit_held_by_a_gate_dropin_says_why(tmp_path: Path) -> None:
 
 
 def test_systemctl_unavailable_is_a_failure_not_a_pass(tmp_path: Path) -> None:
-    a = assess_status(tmp_path, lambda _u: "")  # type: ignore[arg-type]
+    class NoSystemctl(Systemd):
+        def __call__(self, unit: str) -> str:
+            return ""
+
+    a = assess_status(tmp_path, NoSystemctl())
     assert (
         a.level == sv.FAIL
         and "cannot be read here" in a.findings[-1].text
@@ -774,34 +779,59 @@ def test_the_default_systemctl_runner_refuses_to_run_under_pytest() -> None:
 # ---- on demand supervision (#747): a supervisor that starts the workers only while a print runs ---------
 
 
-ONDEMAND_SNAPSHOT = """# managed-by: 3d printer supervise install (do not edit; override with a drop-in)
+TIMER_SNAPSHOT = """# managed-by: 3d printer supervise install (do not edit; override with a drop-in)
 [Unit]
-Description=3D printer supervisor %i (always on, tiny: starts the watch and vision workers only while a print runs)
+Description=3D printer supervisor %i (a timer: every 30 s a one-shot check, no process in between; starts the watch and vision workers only while a print runs)
 Documentation=https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md#on-demand-supervision-747
-After=network-online.target
-StartLimitIntervalSec=0
+
+[Timer]
+OnActiveSec=5s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+"""
+
+CHECK_SNAPSHOT = """# managed-by: 3d printer supervise install (do not edit; override with a drop-in)
+[Unit]
+Description=3D printer on-demand check %i (one-shot: asks the printer, starts or stops the watch and vision workers)
+Documentation=https://github.com/alex-mextner/3d-cli/blob/main/docs/commands/printer.md#on-demand-supervision-747
+ConditionPathExists=/srv/3d-cli/lib/printer_ops/ondemand.py
 
 [Service]
-Type=notify
-WatchdogSec=600
+Type=oneshot
+LogLevelMax=notice
+SyslogLevel=notice
 Environment=PATH=/srv/3d-cli/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONPATH=/srv/3d-cli/lib
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/srv/3d-cli
 UMask=0077
 MemoryMax=96M
-ExecStart=/srv/3d-cli/.venv/bin/python -m printer_ops.ondemand %i
-Restart=always
-RestartSec=30
-TimeoutStopSec=15
-
-[Install]
-WantedBy=default.target
+TimeoutStartSec=90
+ExecStart=/srv/3d-cli/.venv/bin/python -S -m printer_ops.ondemand %i
 """
 
 
-def test_the_supervisor_unit_is_a_snapshot_of_the_shipped_definition() -> None:
-    assert su.render_template("ondemand", LAYOUT) == ONDEMAND_SNAPSHOT
+def test_the_supervisor_timer_is_a_snapshot_of_the_shipped_definition() -> None:
+    assert su.render_template("ondemand", LAYOUT) == TIMER_SNAPSHOT
+
+
+def test_the_check_service_is_a_snapshot_of_the_shipped_definition() -> None:
+    assert su.render_template("ondemand-check", LAYOUT) == CHECK_SNAPSHOT
+
+
+def test_the_check_has_no_install_section_so_only_its_timer_can_start_it() -> None:
+    text = su.render_template("ondemand-check", LAYOUT)
+    assert "[Install]" not in text and "Restart" not in text
+
+
+def test_the_check_is_skipped_silently_while_its_checkout_is_missing() -> None:
+    """The checkout is on the backups disk: without it the unit must be skipped (an unmet Condition), not fail
+    every 30 s."""
+    text = su.render_template("ondemand-check", LAYOUT)
+    assert "ConditionPathExists=/srv/3d-cli/lib/printer_ops/ondemand.py\n" in text
 
 
 @pytest.mark.parametrize("kind", su.KINDS)
@@ -817,7 +847,8 @@ def _polled(seconds_ago: float, printer: str = "idle", phase: str = "idle") -> s
 
 
 def _on_demand(status_text: str, *, camera: bool = True, **over: Any) -> Systemd:
-    """The supervisor runs with `status_text`; the workers are stopped (nothing prints)."""
+    """The supervisor timer is armed and its last check saw `status_text` (see `healthy`); the workers are
+    stopped (nothing prints)."""
     systemd = healthy(camera=camera, status_text=status_text, **over)
     for kind in ("watch", "vision"):
         unit = f"3d-printer-{kind}@p1.service"
@@ -851,6 +882,16 @@ def test_a_print_that_started_within_one_poll_warns_not_running_yet(
     a = assess_status(tmp_path, _on_demand(_polled(10)), state="printing")
     assert a.level == sv.WARN and not findings(a, sv.FAIL)
     assert any("not running yet" in t for t in findings(a, sv.WARN))
+
+
+def test_a_printing_printer_right_after_the_timer_was_armed_warns_instead_of_failing(tmp_path: Path) -> None:
+    systemd = _on_demand("")  # no check has finished yet
+    systemd.units["3d-printer-ondemand@p1.timer"] = unit_show(
+        "active", sub="waiting", enabled="enabled", active_mono=MONO - 2
+    )
+    a = assess_status(tmp_path, systemd, state="printing")
+    assert a.level == sv.WARN and any("not running yet" in t for t in findings(a, sv.WARN))
+    assert not findings(a, sv.FAIL)
 
 
 def test_a_printing_printer_whose_supervisor_polled_long_ago_fails_for_stopped_workers(
@@ -892,8 +933,8 @@ def test_running_workers_are_never_required_enabled_but_the_supervisor_is(
     assert ok.level == sv.OK
     assert not any("not enabled" in f.text for f in ok.findings)
     systemd = healthy()
-    systemd.units["3d-printer-ondemand@p1.service"] = unit_show(
-        enabled="disabled", args="-m printer_ops.ondemand p1"
+    systemd.units["3d-printer-ondemand@p1.timer"] = unit_show(
+        sub="waiting", enabled="disabled"
     )
     bad = assess_status(tmp_path, systemd)
     assert any("ondemand" in t and "not enabled" in t for t in findings(bad, sv.WARN))
@@ -930,17 +971,18 @@ def test_a_fresh_install_writes_ondemand_then_the_workers_and_enables_only_the_s
 ) -> None:
     _, runner = run_install(tmp_path, Systemd(), "--all")
     units = tmp_path / "units"
-    ondemand = (units / "3d-printer-ondemand@.service").read_text()
-    assert su.is_managed(ondemand) and "-m printer_ops.ondemand %i" in ondemand
+    check = (units / "3d-printer-ondemand@.service").read_text()
+    assert su.is_managed(check) and "-m printer_ops.ondemand %i" in check
     assert sorted(p.name for p in units.iterdir()) == [
         "3d-printer-ondemand@.service",
+        "3d-printer-ondemand@.timer",
         "3d-printer-vision@.service",
         "3d-printer-watch@.service",
     ]
     systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl"]
     assert systemctl == [
         ["daemon-reload"],
-        ["enable", "--now", "3d-printer-ondemand@p1.service"],
+        ["enable", "--now", "3d-printer-ondemand@p1.timer"],
     ]
     assert not any(c[2] == "disable" for c in runner.calls if c[0] == "systemctl")
 
@@ -958,6 +1000,7 @@ def test_install_plan_orders_templates_ondemand_watch_vision() -> None:
     )
     templates = [a.target for a in actions if a.op == "write"]
     assert templates == [
+        "3d-printer-ondemand@.timer",
         "3d-printer-ondemand@.service",
         "3d-printer-watch@.service",
         "3d-printer-vision@.service",
@@ -973,7 +1016,7 @@ def test_a_legacy_always_on_install_gets_its_workers_disabled_without_stopping_t
     run_install(tmp_path, Systemd(), "--all")
     _, runner = run_install(tmp_path, legacy, "--all")
     systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
-    assert ["enable", "--now", "3d-printer-ondemand@p1.service"] in systemctl
+    assert ["enable", "--now", "3d-printer-ondemand@p1.timer"] in systemctl
     assert ["disable", "3d-printer-watch@p1.service"] in systemctl
     assert ["disable", "3d-printer-vision@p1.service"] in systemctl
     assert not any(c[0] in ("stop", "disable") and "--now" in c for c in systemctl)
@@ -990,10 +1033,415 @@ def test_uninstall_stops_the_unenabled_workers_and_disables_the_supervisor_with_
     env = env_for(tmp_path, healthy(), runner)
     sv.cmd_uninstall(["--all", "--yes", "--unit-dir", str(units)], env)
     systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
-    assert ["disable", "--now", "3d-printer-ondemand@p1.service"] in systemctl
+    assert ["disable", "--now", "3d-printer-ondemand@p1.timer"] in systemctl
     assert ["stop", "3d-printer-watch@p1.service"] in systemctl
     assert ["stop", "3d-printer-vision@p1.service"] in systemctl
     assert not any(
         c[:2] == ["disable", "--now"] and "watch" in c[-1] for c in systemctl
     )
     assert not list(units.glob("3d-printer-*@.service"))
+    assert not list(units.glob("3d-printer-*@.timer"))
+
+
+# ---- the timer supervisor (#747): what the one-shot check leaves behind, and the retired always-on process ----
+
+
+def test_a_leftover_always_on_supervisor_process_is_stopped_and_disabled_before_the_timer_is_enabled(
+    tmp_path: Path,
+) -> None:
+    old = healthy(supervisor=False)
+    old.units["3d-printer-ondemand@p1.service"] = unit_show(
+        enabled="enabled", args="-m printer_ops.ondemand p1"
+    )
+    run_install(tmp_path, Systemd(), "--all")  # the templates are already the new ones
+    _, runner = run_install(tmp_path, old, "--all")
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    retire = ["disable", "--now", "3d-printer-ondemand@p1.service"]
+    arm = ["enable", "--now", "3d-printer-ondemand@p1.timer"]
+    assert retire in systemctl and arm in systemctl
+    assert systemctl.index(retire) < systemctl.index(arm)
+    # the workers it left running are not touched: the first check adopts them
+    assert not any(c[0] == "stop" for c in systemctl)
+
+
+def test_no_leftover_supervisor_means_no_retire_action() -> None:
+    actions = su.plan_install(
+        [plan()],
+        LAYOUT,
+        installed={},
+        dropins=[],
+        linger=True,
+        enabled={},
+        loaded_dry_run=set(),
+        now=NOW,
+    )
+    assert not [a for a in actions if "3d-printer-ondemand@p1.service" in a.target]
+
+
+def test_the_timer_status_is_the_state_file_view_plus_when_the_check_last_finished() -> (
+    None
+):
+    systemd = healthy(status_text=_polled(7, printer="printing", phase="active"))
+    u = sv.probe_supervisor("p1", systemd, systemd.last_check, NOW, MONO)
+    assert u.unit == "3d-printer-ondemand@p1.timer" and u.running and u.enabled
+    assert sv._status_fields(u.status_text) == {
+        "printer": "printing",
+        "phase": "active",
+        "polled": str(int(NOW - 7)),
+    }
+
+
+def test_a_check_that_only_backed_off_does_not_make_an_old_observation_look_fresh() -> (
+    None
+):
+    """The backoff tick exits 0 without asking the printer: the poll age is the age of the probe that set the
+    deadline, not of the check that skipped it."""
+    systemd = healthy(status_text=_polled(3, printer="unreachable"))
+    systemd.last_checks["p1"]["last_probe_mono"] = MONO - 100
+    u = sv.probe_supervisor("p1", systemd, systemd.last_check, NOW, MONO)
+    assert sv._status_fields(u.status_text)["polled"] == str(int(NOW - 100))
+    systemd.last_checks["p1"]["last_probe_mono"] = (
+        MONO - 1
+    )  # a probe after the last finish: never later than it
+    u = sv.probe_supervisor("p1", systemd, systemd.last_check, NOW, MONO)
+    assert sv._status_fields(u.status_text)["polled"] == str(int(NOW - 3))
+
+
+def test_a_timer_that_never_ran_a_check_since_boot_has_no_status() -> None:
+    systemd = healthy()  # armed, but no check has left a state file
+    u = sv.probe_supervisor("p1", systemd, systemd.last_check, NOW, MONO)
+    assert u.running and u.status_text == ""
+
+
+def test_a_crashing_check_is_a_finding_not_a_fresh_poll_even_though_the_timer_keeps_firing(
+    tmp_path: Path,
+) -> None:
+    """The timer fires every 30 s whether or not the check works: only the check service's own result and finish
+    time say when the printer was last asked. An old `idle` state must not look fresh."""
+    systemd = healthy(status_text=_polled(5000, printer="idle"))
+    systemd.units["3d-printer-ondemand@p1.service"] = unit_show(
+        "failed", sub="failed", enabled="static", inactive_mono=MONO - 2
+    )
+    a = assess_status(tmp_path, systemd, state="printing")
+    assert a.level == sv.FAIL
+    assert any("last on-demand check failed" in t for t in findings(a, sv.FAIL))
+    assert (
+        sv.supervisor_state(a.units[sv.SUPERVISOR], NOW) is None
+    )  # the old snapshot is not trusted
+    nolive = sv.gather(
+        plan(), env_for(tmp_path / "x", systemd), live=False, layout=LAYOUT, linger=True
+    )
+    assert nolive.state is None
+
+
+def test_a_check_skipped_for_a_missing_checkout_looks_old_not_fresh(
+    tmp_path: Path,
+) -> None:
+    """An unmet Condition leaves the service inactive with its OLD finish time: the poll age grows."""
+    systemd = healthy(status_text=_polled(900, printer="idle"))
+    a = assess_status(tmp_path, systemd, state="printing")
+    assert a.level == sv.FAIL and not any(
+        "not running yet" in f.text for f in a.findings
+    )
+
+
+def test_the_check_time_comes_from_monotonic_stamps_whatever_format_systemd_prints_dates_in() -> (
+    None
+):
+    """Numeric CLOCK_MONOTONIC stamps are the same on every systemd version; human date strings are not."""
+    text = (
+        unit_show("inactive", sub="dead", inactive_mono=MONO - 30)
+        + "ActiveEnterTimestamp=Fri 2027-01-15 08:00:00 UTC\n"
+    )
+    u = sv.probe_unit("x", lambda _u: text)
+    assert u.inactive_mono == MONO - 30 and u.since == "Fri 2027-01-15 08:00:00 UTC"
+
+
+def test_an_unreadable_printer_configuration_is_a_finding_because_nothing_can_be_started(
+    tmp_path: Path,
+) -> None:
+    systemd = healthy(status_text=_polled(5))
+    systemd.last_checks["p1"] = {
+        "printer": "idle",
+        "phase": "idle",
+        "config_error": "printers.yaml: bad indent",
+    }
+    a = assess_status(tmp_path, systemd, state="idle")
+    assert a.level == sv.FAIL
+    assert any(
+        "cannot read the printer configuration" in t for t in findings(a, sv.FAIL)
+    )
+
+
+def test_a_printer_the_check_refuses_is_reported_as_refused_not_as_unreadable(
+    tmp_path: Path,
+) -> None:
+    systemd = healthy(status_text=_polled(5))
+    systemd.last_checks["p1"] = {
+        "printer": "idle",
+        "phase": "idle",
+        "config_error": "p1 is not supervised",
+        "refused": True,
+    }
+    a = assess_status(tmp_path, systemd, state="idle")
+    texts = findings(a, sv.FAIL)
+    assert any("does not supervise this printer" in t for t in texts)
+    assert not any("cannot read" in t for t in texts)
+
+
+def test_a_configuration_error_before_the_first_successful_check_still_reaches_status(
+    tmp_path: Path,
+) -> None:
+    systemd = (
+        healthy()
+    )  # armed, the check service has run (inactive since MONO - 3), but no phase yet
+    systemd.units["3d-printer-ondemand@p1.service"] = unit_show(
+        "inactive", sub="dead", enabled="static", inactive_mono=MONO - 3
+    )
+    systemd.last_checks["p1"] = {"printer": "", "phase": "", "config_error": "bad yaml"}
+    a = assess_status(tmp_path, systemd, state="idle")
+    assert any(
+        "cannot read the printer configuration" in t for t in findings(a, sv.FAIL)
+    )
+
+
+def test_an_uninstall_without_a_user_bus_still_attempts_the_stops_and_fails_loudly(
+    tmp_path: Path,
+) -> None:
+    class NoBus(Systemd):
+        def __call__(self, unit: str) -> str:  # `systemctl --user show` answers nothing
+            return ""
+
+    runner = Runner()
+    runner.fail = {"systemctl --user disable --now 3d-printer-ondemand@p1.timer"}
+    env = env_for(tmp_path, NoBus(), runner)
+    with pytest.raises(GateFailure):
+        sv.cmd_uninstall(["--unit-dir", str(tmp_path / "units"), "p1"], env)
+    assert [
+        "systemctl",
+        "--user",
+        "disable",
+        "--now",
+        "3d-printer-ondemand@p1.timer",
+    ] in runner.calls
+
+
+def test_a_running_worker_whose_unit_file_was_deleted_is_still_stopped(
+    tmp_path: Path,
+) -> None:
+    gone = healthy(supervisor=False)
+    gone.units["3d-printer-watch@p1.service"] = unit_show(
+        "active", sub="running", enabled="", load="not-found"
+    )
+    runner = Runner()
+    env = env_for(tmp_path, gone, runner)
+    sv.cmd_uninstall(["--unit-dir", str(tmp_path / "units"), "p1"], env)
+    assert [
+        "systemctl",
+        "--user",
+        "stop",
+        "3d-printer-watch@p1.service",
+    ] in runner.calls
+
+
+def test_a_subset_install_also_migrates_a_peer_waiting_for_its_restart(
+    tmp_path: Path,
+) -> None:
+    old = healthy(supervisor=False)
+    old.units.update(healthy("p2", supervisor=False).units)
+    old.units["3d-printer-ondemand@p1.service"] = unit_show(
+        enabled="enabled", args="-m printer_ops.ondemand p1"
+    )
+    old.units["3d-printer-ondemand@p2.service"] = unit_show(
+        "activating",
+        sub="auto-restart",
+        enabled="disabled",
+        args="-m printer_ops.ondemand p2",
+    )
+    _, runner = run_install(tmp_path, old, "p1", plans=[plan("p1"), plan("p2")])
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    assert ["enable", "--now", "3d-printer-ondemand@p2.timer"] in systemctl
+
+
+def test_a_second_uninstall_finds_nothing_to_stop_and_does_not_fail(
+    tmp_path: Path,
+) -> None:
+    runner = Runner()
+    env = env_for(
+        tmp_path, Systemd(), runner
+    )  # no unit left: the first uninstall removed them all
+    code = sv.cmd_uninstall(
+        ["--all", "--yes", "--unit-dir", str(tmp_path / "units")], env
+    )
+    assert code == 0
+    assert not [
+        c
+        for c in runner.calls
+        if c[:3]
+        in (["systemctl", "--user", "stop"], ["systemctl", "--user", "disable"])
+    ]
+
+
+def test_a_subset_install_also_migrates_the_peers_that_share_the_replaced_template(
+    tmp_path: Path,
+) -> None:
+    """The supervisor service template is shared: replacing it for p1 alone would leave p2, still a resident
+    process of the first design, with a one-shot that runs once and then never again."""
+    old = healthy(supervisor=False)
+    old.units.update(healthy("p2", supervisor=False).units)
+    for name in ("p1", "p2"):
+        old.units[f"3d-printer-ondemand@{name}.service"] = unit_show(
+            enabled="enabled", args=f"-m printer_ops.ondemand {name}"
+        )
+    _, runner = run_install(tmp_path, old, "p1", plans=[plan("p1"), plan("p2")])
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    for name in ("p1", "p2"):
+        assert ["disable", "--now", f"3d-printer-ondemand@{name}.service"] in systemctl
+        assert ["enable", "--now", f"3d-printer-ondemand@{name}.timer"] in systemctl
+
+
+def test_uninstalling_a_first_design_install_skips_the_timer_it_never_had(
+    tmp_path: Path,
+) -> None:
+    """An install of the first #747 design has a resident check process and no timer: systemctl exits 5 for
+    `disable --now` of a unit it has no file for, and that must not turn the uninstall into a failure."""
+    old = healthy(supervisor=False)
+    old.units["3d-printer-ondemand@p1.service"] = unit_show(
+        enabled="enabled", args="-m printer_ops.ondemand p1"
+    )
+    runner = Runner()
+    runner.fail = {
+        "systemctl --user disable --now 3d-printer-ondemand@p1.timer",
+        "systemctl --user stop 3d-printer-ondemand@p1.timer",
+    }
+    env = env_for(tmp_path, old, runner)
+    code = sv.cmd_uninstall(["--unit-dir", str(tmp_path / "units"), "p1"], env)
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    assert code == 0
+    assert ["disable", "--now", "3d-printer-ondemand@p1.service"] in systemctl
+    assert not any(c[-1].endswith(".timer") for c in systemctl)
+    assert ["stop", "3d-printer-watch@p1.service"] in systemctl
+
+
+def test_uninstall_stops_a_check_in_flight_before_the_workers_so_it_cannot_restart_them(
+    tmp_path: Path,
+) -> None:
+    run_install(tmp_path, Systemd(), "--all")
+    runner = Runner()
+    env = env_for(tmp_path, healthy(), runner)
+    sv.cmd_uninstall(["--all", "--yes", "--unit-dir", str(tmp_path / "units")], env)
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    timer = ["disable", "--now", "3d-printer-ondemand@p1.timer"]
+    check = ["stop", "3d-printer-ondemand@p1.service"]
+    watch = ["stop", "3d-printer-watch@p1.service"]
+    assert systemctl.index(timer) < systemctl.index(check) < systemctl.index(watch)
+
+
+def test_uninstall_stops_the_timer_and_the_check_even_when_the_timer_is_not_counted_enabled(
+    tmp_path: Path,
+) -> None:
+    """An enabled-but-stopped timer, or a running one that was `disable`d without --now, reads as not enabled; the
+    timer and a check in flight must still be stopped or they can restart workers after the uninstall."""
+    actions = su.plan_uninstall(
+        [plan()], LAYOUT, installed={}, all_units=False, enabled={}
+    )
+    argvs = [a.argv for a in actions]
+    assert [
+        "systemctl",
+        "--user",
+        "disable",
+        "--now",
+        "3d-printer-ondemand@p1.timer",
+    ] in argvs
+    assert ["systemctl", "--user", "stop", "3d-printer-ondemand@p1.service"] in argvs
+
+
+def test_a_timer_whose_check_service_is_missing_is_a_finding_not_a_pass(
+    tmp_path: Path,
+) -> None:
+    systemd = healthy()
+    del systemd.units[
+        "3d-printer-ondemand@p1.service"
+    ]  # armed timer, nothing for it to run
+    for unit in ("watch", "vision"):
+        systemd.units[f"3d-printer-{unit}@p1.service"] = unit_show(
+            "inactive", sub="dead", enabled="static"
+        )
+    a = assess_status(tmp_path, systemd, state="idle")
+    assert a.level == sv.FAIL
+    assert any(
+        "not installed" in t and "timer has nothing" in t for t in findings(a, sv.FAIL)
+    )
+
+
+def test_a_check_that_has_not_completed_for_ten_minutes_is_a_finding_even_with_an_armed_timer(
+    tmp_path: Path,
+) -> None:
+    """A condition-skipped (missing checkout) or hanging check leaves the OLD finish time: the age says so."""
+    systemd = _on_demand(_polled(sv.CHECK_STALE_S + 60, printer="idle"))
+    a = assess_status(tmp_path, systemd, state="idle")
+    assert a.level == sv.FAIL
+    assert any("no check completes" in t for t in findings(a, sv.FAIL))
+    fresh = assess_status(tmp_path / "f", _on_demand(_polled(40)), state="idle")
+    assert fresh.level == sv.OK, [f.text for f in fresh.findings]
+
+
+def test_a_resident_legacy_supervisor_is_retired_even_when_it_was_only_disabled_not_stopped(
+    tmp_path: Path,
+) -> None:
+    old = healthy(supervisor=False)
+    old.units["3d-printer-ondemand@p1.service"] = unit_show(
+        "active", sub="running", enabled="disabled", args="-m printer_ops.ondemand p1"
+    )
+    run_install(tmp_path, Systemd(), "--all")
+    _, runner = run_install(tmp_path, old, "--all")
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    assert ["disable", "--now", "3d-printer-ondemand@p1.service"] in systemctl
+
+
+def test_a_check_in_flight_is_not_mistaken_for_the_resident_legacy_supervisor(
+    tmp_path: Path,
+) -> None:
+    flight = healthy()
+    flight.units["3d-printer-ondemand@p1.service"] = unit_show(
+        "activating", sub="start", enabled="static"
+    )
+    run_install(tmp_path, Systemd(), "--all")
+    _, runner = run_install(tmp_path, flight, "--all")
+    assert not any(
+        c[2:] == ["disable", "--now", "3d-printer-ondemand@p1.service"]
+        for c in runner.calls
+        if c[0] == "systemctl"
+    )
+
+
+def test_individual_uninstall_also_disables_a_resident_legacy_supervisor_so_it_cannot_return_at_boot(
+    tmp_path: Path,
+) -> None:
+    old = healthy(supervisor=False)
+    old.units["3d-printer-ondemand@p1.service"] = unit_show(
+        "active", sub="running", enabled="enabled", args="-m printer_ops.ondemand p1"
+    )
+    runner = Runner()
+    env = env_for(tmp_path, old, runner)
+    sv.cmd_uninstall(["p1", "--unit-dir", str(tmp_path / "units")], env)
+    systemctl = [c[2:] for c in runner.calls if c[0] == "systemctl" and c[2] != "show"]
+    assert ["disable", "--now", "3d-printer-ondemand@p1.service"] in systemctl
+
+
+def test_an_armed_timer_whose_every_check_was_skipped_is_a_finding_after_the_startup_allowance(
+    tmp_path: Path,
+) -> None:
+    """A missing checkout skips every tick: no check ever completes, so no state file and no finish time exist."""
+    systemd = _on_demand("")
+    systemd.units["3d-printer-ondemand@p1.timer"] = unit_show(
+        sub="waiting", active_mono=MONO - sv.CHECK_STALE_S - 60
+    )
+    a = assess_status(tmp_path, systemd, state="idle")
+    assert a.level == sv.FAIL
+    assert any("no on-demand check has completed" in t for t in findings(a, sv.FAIL))
+    young = _on_demand("")
+    young.units["3d-printer-ondemand@p1.timer"] = unit_show(
+        sub="waiting", active_mono=MONO - 60
+    )
+    assert assess_status(tmp_path / "y", young, state="idle").level == sv.OK
