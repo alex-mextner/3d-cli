@@ -11,7 +11,9 @@ WHAT: reads a declarative assembly spec (`assembly.yaml`: parts with a role and 
     explode     exploded view PNG / USDZ, every part in its own colour with a legend;
     bom         parts (role, reference source, size) and fasteners; stand-ins are labelled;
     position    lay the printed parts on plates and write a project 3MF that `3d arrange` and `3d retarget` accept;
-    show        the parsed spec and the colour legend.
+    show        the parsed spec and the colour legend;
+    pair        two parts, no spec: interpenetration volume, minimum clearance, per-feature radial clearance of threads
+                and ribs (model and, with G-code, as printed).
 
 WHY: one insert/socket pair at a time (`fit-check`) cannot tell whether a case, its board and its snap hooks go together,
   come apart and can be operated by hand. This is the whole-assembly check with the fit table behind every number.
@@ -26,10 +28,10 @@ from cli.pyrun import run_tool
 from cli.registry import Command
 from errors import UsageError
 
-SUBS = ("check", "sweep", "order", "ergonomics", "explode", "bom", "position", "show")
-DEPS = "trimesh,manifold3d,numpy,scipy,rtree,pyyaml,pillow,networkx"
+SUBS = ("check", "sweep", "order", "ergonomics", "explode", "bom", "position", "show", "pair")
+DEPS = "trimesh,manifold3d,numpy,scipy,rtree,pyyaml,pillow,networkx,shapely"
 
-USAGE = """3d assembly <check|sweep|order|ergonomics|explode|bom|position|show> TARGET [options]
+USAGE = """3d assembly <check|sweep|order|ergonomics|explode|bom|position|show|pair> TARGET [options]
   Whole-assembly checks over a declared spec. TARGET is an assembly spec (assembly.yaml / .json), a project
   directory holding assembly.yaml, or (check / sweep / order / ergonomics / explode / bom / show) a 3MF written by
   `position`, which is then verified as printed. Every subcommand takes --json (schema `3d.assembly/1`, `kind`
@@ -72,6 +74,17 @@ Subcommands:
   show TARGET
       the parsed spec, resolved context and the colour legend.
       Example: 3d assembly show assembly.yaml
+  pair A B [--scale-a S] [--scale-b S] [--pose-a POSE] [--pose-b POSE] [feature flags | --features FILE] [--zone BOX]
+       [--min-radial-gap MM | --fit TYPE] [--min-clearance MM] [--max-overlap-mm3 V] [--screw-to-best]
+       [--gcode-a F --object-a NAME --print-a POSE] [--gcode-b F --object-b NAME --print-b POSE]
+      do two parts mate? A and B are meshes (STL / 3MF / OBJ / PLY; a 3MF with several objects: `plate.3mf#ID` picks
+      one, the build-item transform is applied), each with an optional scale and pose into the assembled frame. Reports the exact interpenetration volume (regions, depth, xyz; a region thinner than
+      --seat-tol is a seat contact), the exact minimum clearance, and per FEATURE (a thread, ribs, a bore) the radial
+      clearance read from surface profiles around an axis: the gap at the posed phase and at the best phase of
+      screwing / clocking, the free play, crest and root clearances, handedness and pitch coherence. With a G-code
+      per part the same numbers from the printed outer-wall paths (the slicer's compensation included), the
+      layer-by-layer wall-vs-model deviation, and the registration of the model on the printed object.
+      Example: 3d assembly pair rim.stl plug.stl --scale-a 2.00493695 --scale-b 2.00493695 --pose-b '{translate: [0, 0, -37.78]}' --a-side inner --b-side outer --pitch 3.007 --a-z=-36.78:-28.28 --b-z=-36.78:-30.98 --screw-to-best
 
 Options:
   --mate NAME        restrict to one mate (repeatable). Example: 3d assembly check assembly.yaml --mate lid
@@ -109,9 +122,68 @@ Options:
                      Example: 3d assembly position a.yaml --3mf p.3mf --include-non-printable --reason "fit test" --yes
   --reason TEXT      why the override (logged with it). Example: 3d assembly position a.yaml --3mf p.3mf --include-non-printable --reason "fit test" --yes
   --yes              write the 3MF (position is a dry run without it). Example: 3d assembly position a.yaml --3mf p.3mf --yes
+  --scale-a S / --scale-b S
+                     scale applied to the mesh first (a print scale such as 2.00493695).
+                     Example: 3d assembly pair rim.stl plug.stl --scale-a 2 --scale-b 2
+  --pose-a POSE / --pose-b POSE
+                     place the part in the assembled frame: a spec pose, `{scale, rotate (deg), translate}` or a list of them.
+                     Example: 3d assembly pair rim.stl plug.stl --pose-b '{rotate: [0, 0, 90], translate: [0, 0, -10]}'
+  --axis AXIS        the common axis of the features: x | y | z | -z | X,Y,Z (default z).
+                     Example: 3d assembly pair a.stl b.stl --a-side inner --b-side outer --axis x
+  --axis-point X,Y,Z a point on the axis in the assembled frame (default: centre of A's box). Feature z windows are
+                     the coordinate along the axis. Example: 3d assembly pair a.stl b.stl --a-side inner --b-side outer --axis-point 110,110,0
+  --a-side inner|outer / --b-side inner|outer
+                     the feature's surface on each part: inner = the wall of a bore, outer = a boss; one of each.
+                     Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer
+  --a-z LO:HI / --b-z LO:HI
+                     the feature's z window along the axis (default: the whole part); a negative bound needs `=`.
+                     Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --a-z 1:9.5 --b-z=-9:-2
+  --a-r LO:HI / --b-r LO:HI
+                     the feature's radius window from the axis (default: a bore reads from the axis to the boss's largest
+                     radius + 3 mm). Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --a-r 0:36.4 --b-r 0:36
+  --pitch MM         thread pitch of the feature; 0 or omitted = ribs / keys (profile against the angle only). Handedness
+                     is detected and a mismatch FAILs. Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --pitch 3.007
+  --hand auto|right|left
+                     force the handedness (default auto). Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --pitch 3 --hand right
+  --feature-name N   the feature's name in the report. Example: 3d assembly pair a.stl b.stl --a-side inner --b-side outer --feature-name rim_thread
+  --features FILE    several features from a YAML / JSON list (name, pitch, hand, min_gap_mm, a/b {side, z, r}).
+                     Example: 3d assembly pair rim.stl plug.stl --features features.yaml
+  --min-radial-gap MM
+                     radial gap every feature must keep at its best phase (default 0.1).
+                     Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --pitch 3 --min-radial-gap 0.2
+  --fit TYPE         take the required radial gap from the fit table (clearance - tol of `3d fits resolve`), with --shape
+                     (default round), --printer, --material, --nozzle, --layer.
+                     Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --fit sliding --printer k1se --material PETG
+  --shape S / --nozzle MM / --layer MM
+                     the fit lookup's shape, nozzle and layer height. Example: 3d assembly pair a.stl b.stl --fit sliding --shape round --nozzle 0.4 --layer 0.2
+  --min-clearance MM the exact minimum gap the parts must keep (0 where parts seat). Example: 3d assembly pair a.stl b.stl --min-clearance 0.3
+  --zone BOX         measure the minimum gap only among surface samples inside XMIN,YMIN,ZMIN,XMAX,YMAX,ZMAX (a seat
+                     face outside it does not count). Example: 3d assembly pair a.stl b.stl --zone=-40,-40,1,40,40,9.5
+  --max-overlap-mm3 V
+                     interpenetration volume that is still allowed (a designed press fit; default 0.01).
+                     Example: 3d assembly pair a.stl b.stl --max-overlap-mm3 4
+  --seat-tol MM      an overlap thinner than this is a seat contact, not a collision (default 0.02).
+                     Example: 3d assembly pair a.stl b.stl --seat-tol 0.05
+  --screw-to-best    turn B about the axis to the best phase of the first feature before measuring (a screwed fit has no
+                     unique pose; the turn keeps the axial position). Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --pitch 3 --screw-to-best
+  --gcode-a F / --gcode-b F
+                     the sliced G-code that printed the part; adds the as-printed numbers.
+                     Example: 3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --pitch 3 --gcode-b plug.gcode --object-b "Plug x2.stl"
+  --object-a NAME / --object-b NAME
+                     which object of the G-code (the slicer's object label; a wrong or ambiguous name lists the file's
+                     labels, `"Cup.stl id:0 copy 1"` picks one copy; omitted = the plate's only object).
+                     Example: 3d assembly pair rim.stl plug.stl --gcode-a plate.gcode --object-a "Pot Pepper.stl"
+  --print-a POSE / --print-b POSE
+                     how the (scaled) model sits on the bed: rotate / scale like a pose. Without a translate it is
+                     dropped on z = 0 and registered on the printed walls in XY; with one it is used as given.
+                     Example: 3d assembly pair rim.stl plug.stl --gcode-a rim.gcode --print-a '{rotate: [180, 0, 0]}'
+  --skip-below MM    layers below this bed height are left out of the wall deviation (first-layer flare; default 0.5).
+                     Example: 3d assembly pair rim.stl plug.stl --gcode-a rim.gcode --skip-below 0.8
+  --max-faces N      refuse meshes with more triangles (default 400000). Example: 3d assembly pair a.stl b.stl --max-faces 200000
   --json             one JSON document, schema `3d.assembly/1`. Example: 3d assembly check assembly.yaml --json | jq .summary
 
-Spec: docs/commands/assembly.md (parts, mates, snap hooks, access, zones, loads)."""
+Spec: docs/commands/assembly.md (parts, mates, snap hooks, access, zones, loads; `pair` features and G-code).
+Feature flags of `pair` take values that start with a minus after `=` or on their own (`--a-z -36:-28` works)."""
 
 
 def run(argv: list[str]) -> int:
@@ -136,6 +208,8 @@ def run(argv: list[str]) -> int:
             command="assembly",
             remediation=[f"Example: 3d assembly {argv[0]} assembly.yaml"],
         )
+    if argv[0] == "pair":
+        return run_tool(DEPS, "assembly_pair_cli.py", argv)
     return run_tool(DEPS, "assembly_cli.py", argv)
 
 

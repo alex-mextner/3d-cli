@@ -7,7 +7,7 @@ hooks and screws, and where each printed part sits on the plates. Umbrella #570,
 #553 (declared insertion axis) and covers the assembly-motion part of #61.
 
 Every subcommand takes `--json` (schema `3d.assembly/1`, `kind` = `check | sweep | sweeps | order | ergonomics | explode |
-bom | position | show`). Exit codes: `0` ok, `1` a verdict failed (blocking intersection, blocked path, no access, no
+bom | position | show | pair`). Exit codes: `0` ok, `1` a verdict failed (blocking intersection, blocked path, no access, no
 straight order), `2` bad spec / usage, `127` missing dependency.
 
 ## Usage
@@ -23,6 +23,13 @@ straight order), `2` bad spec / usage, `127` missing dependency.
                      [--process NAME] [--filament NAME] [--preset-dir DIR]... [--set K=V]...
                      [--include-non-printable] [--reason TEXT] [--yes] [--json]
 3d assembly show TARGET [--json]
+3d assembly pair A B [--scale-a S] [--scale-b S] [--pose-a POSE] [--pose-b POSE] [--axis AXIS] [--axis-point X,Y,Z]
+                 [--a-side inner|outer --b-side inner|outer [--pitch MM] [--hand auto|right|left] [--a-z LO:HI] [--b-z LO:HI]
+                  [--a-r LO:HI] [--b-r LO:HI] [--feature-name N] | --features FILE]
+                 [--min-radial-gap MM | --fit TYPE [--shape S] [--printer P] [--material M] [--nozzle MM] [--layer MM]]
+                 [--min-clearance MM] [--zone XMIN,YMIN,ZMIN,XMAX,YMAX,ZMAX] [--max-overlap-mm3 V] [--seat-tol MM]
+                 [--screw-to-best] [--gcode-a F --object-a NAME --print-a POSE] [--gcode-b F --object-b NAME --print-b POSE]
+                 [--skip-below MM] [--max-faces N] [--json]
 ```
 
 `TARGET` is an assembly spec (`assembly.yaml` / `.json`), a project directory holding `assembly.yaml` next to its
@@ -38,6 +45,7 @@ straight order), `2` bad spec / usage, `127` missing dependency.
 3d assembly position assembly.yaml --3mf out/plates.3mf --base-project print/mole.3mf --yes
 3d assembly position assembly.yaml --3mf out/plates.3mf --include-non-printable --reason "fit test" --yes
 3d assembly show assembly.yaml
+3d assembly pair rim.stl plug.stl --a-side inner --b-side outer --pitch 3.007 --screw-to-best
 ```
 
 ## The spec (`3d.assembly/1`)
@@ -84,6 +92,71 @@ loads:                          # carried in the report for the S4 solver
 * **Zones** (`{min,max}`, `{center,size}`, `{center,radius}`) describe the CLOSED pose; they are ignored while a part moves.
 * **Roles**: `printed | vitamin | reference | stand_in` (`lib/parts.py`); a vitamin or reference model must name its source
   URL and licence, a stand-in is labelled as invented in the BOM and drawn ghosted.
+
+## `pair` - do two parts mate? (no spec)
+
+`3d assembly check` judges declared mates of a spec. `pair` takes two meshes (STL / 3MF / OBJ / PLY), each with an optional
+scale and pose into the assembled frame, and answers the question for one pair, down to a thread or a rib. A 3MF is read with the
+stdlib reader (no lxml); one that holds several objects needs `plate.3mf#ID` (the refusal lists the ids), and its build-item
+transform is part of the mesh:
+
+```bash
+# rim (the ball's bore) and plug at the print scale, plug seated under the rim; thread pitch 3.007 mm; model only
+3d assembly pair rim.stl plug.stl --scale-a 2.00493695 --scale-b 2.00493695 --pose-b '{translate: [0, 0, -37.782]}' \
+    --a-side inner --b-side outer --pitch 3.007 --a-z -36.78:-28.28 --a-r 0:36.4 --b-z -36.78:-30.98 --b-r 0:36 --screw-to-best
+# the same, as printed: the plug from its K1 G-code, the new rim from its slice; both placed on the bed automatically
+3d assembly pair rim.stl plug.stl ... --gcode-a rim.gcode --object-a "rim.stl" --gcode-b plate.gcode --object-b "Plug x2.stl"
+# several features from a file, the clearance the fit table asks for on this printer and plastic
+3d assembly pair a.stl b.stl --features features.yaml --fit sliding --printer k1se --material PETG
+```
+
+* **interpenetration** - exact overlap regions (volume, depth, xyz as in `check`); a region thinner than `--seat-tol`
+  (0.02 mm) is a seat contact, not a collision. FAILs above `--max-overlap-mm3` (default 0.01): a designed press fit is allowed
+  only by saying how much.
+* **clearance** - the exact minimum gap of the two solids (0 where parts seat on a face); `--zone BOX` measures only the surface
+  samples inside a box (spacing reported), which leaves a seat face out; `--min-clearance` makes it a verdict.
+* **features** - the part of the question a volume cannot answer. A feature is the surface of each part around a COMMON AXIS
+  (`--axis`, `--axis-point`; z windows are the coordinate along it, r windows the radius from it): `--a-side inner` is the wall
+  of a bore, `outer` a boss; one of each. The surface radius is read against the PHASE `u` (a thread: `z/pitch -+ theta/2pi`, one
+  value per `u` for a perfect single-start thread; ribs and keys, `--pitch 0`: the angle), 360 bins, from the model's sections
+  every 0.12 mm. The bore minus the boss is the radial gap, at the posed phase and at every other relative phase - which is
+  screwing (a turn = an axial advance of one pitch) or clocking. Reported: the gap at the pose, the best phase and the tightest
+  radial gap there, the free play (mm of axial travel of a thread, degrees for ribs), male crest -> female root and female crest ->
+  male root clearances, handedness (detected, a mismatch FAILs: the threads cannot screw together), pitch coherence (a wrong pitch
+  shows as a large value and a warning), coverage of the phase bins (unmeasured = FAIL under 50 %), and the concentricity of each
+  feature's own axis with the declared one. FAILs when the best-phase gap is under `--min-radial-gap` (default 0.1) or the
+  `--fit TYPE` row (`clearance - tol` per face of `3d fits resolve`, printer x material corrected). The posed phase may interfere
+  while a free phase exists: that is a WARN with the move that fixes it, in turns, degrees and mm of advance.
+  A bore with no `--a-r` is read from the axis out to the boss's largest radius + 3 mm (else its own outer wall would count).
+* **`--screw-to-best`** turns B about the axis to the best phase of the first feature before anything else is measured (a screwed
+  fit has no unique pose: the phase is free). The turn keeps B's axial position, so a part that seats on a face stays seated.
+* **as printed** - `--gcode-a/--gcode-b` (+ `--object-a/b` when the plate holds several objects; the slicer's own object labels - a wrong or
+  ambiguous name, a name that matches several copies, or none on a multi-object plate lists the file's labels; `"Cup.stl id:0
+  copy 1"` picks one copy) read the OUTER WALL paths of the object (`lib/gcode_walls.py`: Orca / Snapmaker Orca / Bambu /
+  PrusaSlicer, arcs, relative extrusion). The model is put on the bed (`--print-a POSE`: orientation like a pose; without a
+  `translate` it is dropped on z = 0 and REGISTERED on the walls in XY by a translation-only fit - the slicer's own placement), the
+  per-layer deviation of the printed wall from the model's section at the layer mid height is reported (the wall centre line is
+  half a line width inside the surface; layers under `--skip-below` are listed apart: first-layer flare), overall and inside the
+  feature's window, and the feature clearance is recomputed with the printed surface (`centre line +- width/2` radially). A part
+  without a G-code is taken from its model, the report says which side is printed. The slicer's compensation
+  (`xy_hole_compensation`, elephant-foot, line width) therefore shows in the numbers, which a model-only check cannot see.
+
+`features.yaml` (several features, the single-feature flags are the same keys):
+
+```yaml
+features:
+  - name: rim_thread
+    pitch: 3.007            # 0 / absent = ribs or keys
+    hand: auto              # auto | right | left
+    min_gap_mm: 0.2         # per-feature requirement (else --min-radial-gap / --fit / 0.1)
+    a: {side: inner, z: [-36.78, -28.28], r: [0, 36.4]}
+    b: {side: outer, z: [-36.78, -30.98], r: [0, 36.0]}
+```
+
+A value that starts with `-` may be given after `=` (`--a-z=-36:-28`) or as the next argument (`--a-z -36:-28`).
+Exit codes as the other subcommands: 0 ok, 1 a verdict failed, 2 bad input (an unknown object name, a window without surface, two
+bores), 127 missing dependency. `--json` document: `kind: pair` with `parts`, `axis`, `interpenetration`, `clearance`, `features`
+(each with `model` and, with a G-code, `as_printed`, `printed_vs_model`), `printed`, `fit`, `summary`.
 
 ## What each check does
 
