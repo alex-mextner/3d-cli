@@ -968,7 +968,8 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   `pose_inliers` and `pose` in the verdict say so, the evidence frame marks the pixels on the camera frame; a
   `--no-plate` reference taken from another view is not used. **Lost** (no consistent match, the scene lines
   up only far away — the camera sits lower or closer —, or too little of the bed region is in the frame):
-  pixels say nothing, anything but a clear bed with the plate on becomes `unknown` and the preflight `bed` line
+  the frame was not judged, so every verdict — a clear bed with the plate on too, never a PASS — becomes `unknown`
+  (`pose_shift_px` in the metrics) and the preflight `bed` line
   a WARN naming the fix: with the plate on and the bed empty take a reference from where the camera is now
   (`3d printer bed reference NAME --capture`), or put the toolhead back where the reference was taken;
   `bed check --assume-empty "why"` then works as for any unknown. A plate that is really off and a part that is

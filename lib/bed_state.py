@@ -773,8 +773,8 @@ def _classify_selected(img: np.ndarray, plate_ref: Reference | None, noplate_ref
 def _apply_pose(v: Verdict, pose: bed_pose.Pose, printer: str, roi_source: str) -> Verdict:
     """The verdict of a frame located against its reference (bed_pose.py), with the pose in `info` and `pose_ncc`
     in the metrics. `moved`: say so, and bring the evidence masks (in the reference's picture) back onto the camera
-    frame. `lost`: pixels of a picture the camera no longer sees are not findings: whatever is not a clear bed with
-    the plate on is `unknown` with the way to a reference that fits."""
+    frame. `lost`: the frame was not judged against a picture it no longer sees, so EVERY verdict, a clear bed with
+    the plate on included, is `unknown` with the way to a reference that fits (never a PASS)."""
     metrics = {**v.metrics, "pose_ncc": pose.ncc}
     info = {**v.info, "pose": pose.info()}
     reason = v.reason
@@ -799,16 +799,17 @@ def _apply_pose(v: Verdict, pose: bed_pose.Pose, printer: str, roi_source: str) 
 
         return replace(v, reason=f"{reason}; {pose.why}", changed=unwarp(v.changed), roi=unwarp(v.roi), info=info,
                        metrics={**metrics, "pose_shift_px": pose.shift_px, "pose_inliers": float(pose.inliers)})
-    if pose.state != bed_pose.LOST or (v.bed == CLEAR and v.plate == PRESENT):
+    if pose.state != bed_pose.LOST:
         return replace(v, reason=reason, metrics=metrics, info=info)
     read = ", ".join(f"{k} {w}" for k, w in (("bed", v.bed), ("plate", v.plate)) if w != UNKNOWN)
     found = f"the pixels alone read `{read}`: " if read else "the pixels alone: "
     return replace(v, bed=UNKNOWN, plate=UNKNOWN, info=info,
-                   metrics={**metrics, "pose_inliers": float(pose.inliers)},
-                   reason=(f"cannot judge the bed: the camera is not where it was when the reference was taken, so a "
-                           f"changed picture says nothing about the plate or parts ({pose.why}; {found}{v.reason}). Fix: with the plate on and the bed empty take a reference "
-                           f"from where the camera is now: `3d printer bed reference {printer} --capture`{drawn}; "
-                           f"or put the toolhead back where the reference was taken"))
+                   metrics={**metrics, "pose_shift_px": pose.shift_px, "pose_inliers": float(pose.inliers)},
+                   reason=(f"cannot judge the bed: the camera is not where it was when the reference was taken, so the "
+                           f"frame was not judged at all, a clear read is as void as a changed one ({pose.why}; "
+                           f"{found}{v.reason}). Fix: with the plate on and the bed empty take a reference from where "
+                           f"the camera is now: `3d printer bed reference {printer} --capture`{drawn}; or put the "
+                           f"toolhead back where the reference was taken"))
 
 
 def occupied_confident(v: Verdict, th: Thresholds, view_min: float) -> bool:

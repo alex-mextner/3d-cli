@@ -218,6 +218,28 @@ def test_an_empty_bed_region_is_reported_by_the_classifier_not_crashed_on() -> N
     assert v.bed == "unknown" and "empty or tiny" in v.reason
 
 
+@pytest.mark.parametrize("with_a_part", [False, True])
+def test_a_frame_whose_camera_is_lost_is_never_clear_even_when_its_pixels_look_like_the_reference(
+    with_a_part: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost pose means the frame was not judged: `3d printer start` must not go ahead on a `clear` read from
+    pixels that happen to match. The locator is forced to say `lost` on frames that look clear (the real idle frame,
+    and the same frame with a part on the plate in a spot the pixels compare against the reference)."""
+    ref = ref_of("k1se_idle_ref.jpg")
+    img = with_part(ref.image, 230, 170) if with_a_part else ref.image
+    monkeypatch.setattr(P, "locate", lambda *_: P.Pose(P.LOST, "the camera does not see the scene of the reference",
+                                                       0.1, 7, 0.0))
+    pixels = B._classify_selected(img, ref, None, IDLE_Z, "k1se", B.TH, B.ZMatch(), None)
+    assert pixels.bed == ("occupied" if with_a_part else "clear"), pixels.reason  # what the pixels alone say
+    v = classify(img, ref)
+    assert (v.bed, v.plate) == ("unknown", "unknown"), v.reason
+    assert v.info["pose"]["state"] == "lost" and v.metrics["pose_shift_px"] == 0.0
+    assert "was not judged at all" in v.reason and "bed reference k1se --capture" in v.reason
+    check = preflight.check_bed_verdict({"printer": "k1se", "bed": v.bed, "plate": v.plate, "reason": v.reason,
+                                         "source": "camera now", "age_s": 0.0})
+    assert check.status == preflight.WARN  # never PASS, never the FAIL of a finding either
+
+
 def test_a_whole_frame_roi_has_no_scene_to_locate_by_and_is_judged_as_before() -> None:
     ref = ref_of("k1se_idle_ref.jpg")
     whole = np.ones(ref.image.shape[:2], bool)
