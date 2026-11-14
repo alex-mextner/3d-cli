@@ -26,6 +26,9 @@ HOW IT DECIDES: against a reference frame of the EMPTY bed WITH the plate, taken
     plate: with a `--no-plate` reference too, whichever reference the bed surface matches
            better; with the plate reference only, most of the surface changed -> missing
            (plate off, or the bed covered); surface under 2% of the frame -> unknown.
+  pose:  the K1 SE camera rides with the toolhead, so the frame is first LOCATED against the reference
+         (bed_pose.py): same view -> judged as is; moved but alignable -> warped onto the reference;
+         unalignable -> a `plate missing` / `occupied` read from pixels becomes unknown with the fix.
   ROI: fleet `watch.bed.roi` (a polygon of the bed in the frame at the reference Z) if given,
   else the camera calibration (vision_geometry: bed surface and the volume above it up to
   `volume_height_mm`, projected at the reference Z), else the whole frame.
@@ -89,6 +92,7 @@ from printer_ops.bed import (  # noqa: E402
 )
 from printer_ops.bed_light import LightSession, write_block  # noqa: E402
 
+import bed_pose  # noqa: E402
 import bed_refs  # noqa: E402
 from bed_view import view_in_progress  # noqa: E402
 
@@ -695,7 +699,6 @@ def _judge_objects(img: np.ndarray, ref: Reference, inner: np.ndarray, plate_inf
 def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: str,
              th: Thresholds = TH, match: ZMatch | None = None, ctx: bed_refs.JudgeContext | None = None) -> Verdict:
     import cv2
-    import numpy as np
 
     match = match or ZMatch()
     hidden = out_of_view(match, z, th)
@@ -705,6 +708,49 @@ def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: s
     plate_ref, noplate_ref, early = _select_refs(img, refs, z, printer, match, ctx)
     if early is not None:
         return early
+    base = plate_ref or noplate_ref
+    assert base is not None
+    pose = bed_pose.locate(base.image, img, base.volume)
+    plate_ref, noplate_ref, pose = _refs_for_view(img, plate_ref, noplate_ref, pose)
+    base = plate_ref or noplate_ref
+    assert base is not None
+    if pose.state == bed_pose.MOVED:  # judge in the reference's picture, inside what the moved frame still covers
+        assert pose.h is not None and pose.covered is not None
+        img = cv2.warpPerspective(img, pose.h, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_REPLICATE)
+        plate_ref, noplate_ref = ((_within(base, pose.covered), None) if base is plate_ref
+                                  else (None, _within(base, pose.covered)))
+    v = _classify_selected(img, plate_ref, noplate_ref, z, printer, th, match, ctx)
+    return _apply_pose(v, pose, printer, base.roi_source)
+
+
+def _refs_for_view(img: np.ndarray, plate_ref: Reference | None, noplate_ref: Reference | None,
+                   pose: bed_pose.Pose) -> tuple[Reference | None, Reference | None, bed_pose.Pose]:
+    """The references that stand for the view `img` is seen from, and the pose against the first of them. `pose` is
+    the one against `plate_ref` (or against `noplate_ref` when that is all there is). A bare-bed reference taken
+    from another view than the frame's is not used (it would read every plate as present); when the bare-bed one
+    is the one taken from here and the with-plate one is not, the bare-bed one is all there is."""
+    if plate_ref is None or noplate_ref is None or pose.state == bed_pose.BLIND:
+        return plate_ref, noplate_ref, pose
+    other = bed_pose.locate(noplate_ref.image, img, noplate_ref.volume)
+    if pose.state == bed_pose.SAME and other.state in (bed_pose.SAME, bed_pose.BLIND):
+        return plate_ref, noplate_ref, pose
+    if pose.state != bed_pose.SAME and other.state == bed_pose.SAME:
+        return None, noplate_ref, other
+    return plate_ref, None, pose
+
+
+def _within(ref: Reference, valid: np.ndarray) -> Reference:
+    """`ref` judged only where the moved frame covers the reference's picture."""
+    return replace(ref, volume=ref.volume & valid, surface=ref.surface & valid)
+
+
+def _classify_selected(img: np.ndarray, plate_ref: Reference | None, noplate_ref: Reference | None,
+                       z: float | None, printer: str, th: Thresholds, match: ZMatch,
+                       ctx: bed_refs.JudgeContext | None) -> Verdict:
+    import cv2
+    import numpy as np
+
     base = plate_ref or noplate_ref
     assert base is not None
     stats = _light_stats(base, img, th, ctx)
@@ -722,6 +768,47 @@ def classify(img: np.ndarray, refs: list[Reference], z: float | None, printer: s
                        f"fix watch.bed.roi and capture the reference again; {plate_why}", metrics)
     v = _judge_objects(img, ref, inner, (plate, plate_why, metrics), (match.in_view(z), z, printer), th, stats)
     return _vet_reference(v, ref, ctx, printer)
+
+
+def _apply_pose(v: Verdict, pose: bed_pose.Pose, printer: str, roi_source: str) -> Verdict:
+    """The verdict of a frame located against its reference (bed_pose.py), with the pose in `info` and `pose_ncc`
+    in the metrics. `moved`: say so, and bring the evidence masks (in the reference's picture) back onto the camera
+    frame. `lost`: pixels of a picture the camera no longer sees are not findings: whatever is not a clear bed with
+    the plate on is `unknown` with the way to a reference that fits."""
+    metrics = {**v.metrics, "pose_ncc": pose.ncc}
+    info = {**v.info, "pose": pose.info()}
+    reason = v.reason
+    # a `watch.bed.roi` polygon is a region of the frame: a reference taken from another place keeps it where it was
+    drawn = ("; watch.bed.roi is drawn on the frame: check that it outlines the plate from the new place (the cyan "
+             "outline of the evidence frame)") if "watch.bed.roi" in roi_source else ""
+    if v.plate == MISSING and pose.state != bed_pose.LOST:  # the plate is off, or the reference is wrong
+        reason += (f"; if the plate IS on, retake the reference with the plate on and the bed empty: "
+                   f"`3d printer bed reference {printer} --capture`{drawn}")
+    if pose.state == bed_pose.MOVED:
+        assert pose.h is not None
+        import cv2
+        import numpy as np
+
+        back = np.linalg.inv(pose.h)
+
+        def unwarp(mask: Any) -> Any:
+            if mask is None:
+                return None
+            return cv2.warpPerspective(mask.astype(np.uint8), back, (mask.shape[1], mask.shape[0]),
+                                       flags=cv2.INTER_NEAREST) > 0
+
+        return replace(v, reason=f"{reason}; {pose.why}", changed=unwarp(v.changed), roi=unwarp(v.roi), info=info,
+                       metrics={**metrics, "pose_shift_px": pose.shift_px, "pose_inliers": float(pose.inliers)})
+    if pose.state != bed_pose.LOST or (v.bed == CLEAR and v.plate == PRESENT):
+        return replace(v, reason=reason, metrics=metrics, info=info)
+    read = ", ".join(f"{k} {w}" for k, w in (("bed", v.bed), ("plate", v.plate)) if w != UNKNOWN)
+    found = f"the pixels alone read `{read}`: " if read else "the pixels alone: "
+    return replace(v, bed=UNKNOWN, plate=UNKNOWN, info=info,
+                   metrics={**metrics, "pose_inliers": float(pose.inliers)},
+                   reason=(f"cannot judge the bed: the camera is not where it was when the reference was taken, so a "
+                           f"changed picture says nothing about the plate or parts ({pose.why}; {found}{v.reason}). Fix: with the plate on and the bed empty take a reference "
+                           f"from where the camera is now: `3d printer bed reference {printer} --capture`{drawn}; "
+                           f"or put the toolhead back where the reference was taken"))
 
 
 def occupied_confident(v: Verdict, th: Thresholds, view_min: float) -> bool:

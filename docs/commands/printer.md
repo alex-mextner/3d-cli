@@ -955,6 +955,26 @@ until someone takes them off. The camera can see that, so nobody has to tell an 
   `unknown`, "out of the camera's view … it sees the bed again at Z 210 or below", and no
   reference is taken there: it would read every low part as a clear bed
   ([#402](https://github.com/alex-mextner/3d-cli/issues/402)).
+- **A camera that moved** (`lib/bed_pose.py`). The K1 SE camera rides with the toolhead, so after a job
+  or a home the same empty plate is seen from another place: the whole picture, background included, is
+  shifted and zoomed by tens of px. Against a reference taken from elsewhere that read «70 % of the bed surface
+  changed» — `plate missing`, FAIL, start refused, on a plate that was on (2026-11-13). The frame is now
+  *located* against its reference before it is judged, by the scene round the bed region (what a plate or a part
+  cannot change). **Same view** (the edge structure of the scene correlates ≥ 0.85, or in another light the
+  scene does not shift, or the SIFT homography moves the bed under 4 px — a fixed camera, in any light):
+  judged as before. **Moved** (SIFT features agree on a plausible homography, after warping the scene lines up
+  again, edge correlation ≥ 0.65, and ≥ 90 % of the bed region is still in the frame): the frame is warped onto
+  the reference and judged there with the reference's ROI; `reason`, the metrics `pose_shift_px` /
+  `pose_inliers` and `pose` in the verdict say so, the evidence frame marks the pixels on the camera frame; a
+  `--no-plate` reference taken from another view is not used. **Lost** (no consistent match, the scene lines
+  up only far away — the camera sits lower or closer —, or too little of the bed region is in the frame):
+  pixels say nothing, anything but a clear bed with the plate on becomes `unknown` and the preflight `bed` line
+  a WARN naming the fix: with the plate on and the bed empty take a reference from where the camera is now
+  (`3d printer bed reference NAME --capture`), or put the toolhead back where the reference was taken;
+  `bed check --assume-empty "why"` then works as for any unknown. A plate that is really off and a part that is
+  really on still FAIL when the camera moved and could be aligned. A K1 SE `watch.bed.roi` polygon is a
+  region of the reference's picture: redraw it when the reference is taken from another view than the one it
+  was drawn on, or it covers mostly the wall (a whole-frame ROI leaves no scene to locate by: judged as before).
 - **Status.** `3d printer bed status u1` — `clear` / `occupied` / `unknown` and plate `present` /
   `missing` / `unknown`, with the reason and an evidence frame (ROI cyan, changed pixels red) in
   `~/.cache/3d-cli/vision/bed/`. `--max-age S` takes the watcher's last verdict when it was
