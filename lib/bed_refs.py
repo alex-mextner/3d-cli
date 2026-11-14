@@ -159,6 +159,11 @@ def refresh_refusal(verdict: Mapping[str, Any], view_min: float) -> str | None:
     the frame, `watch.bed.auto_view_min`), with the printer's light on (or no light to switch)."""
     if verdict.get("bed") != "clear" or verdict.get("plate") != "present":
         return f"the bed check says bed {verdict.get('bed')}, plate {verdict.get('plate')}, not clear with the plate on"
+    pose = verdict.get("pose")
+    if isinstance(pose, Mapping) and pose.get("state") in ("moved", "lost"):
+        return (f"the camera is not where the reference was taken (it is {pose.get('state')}, ~{pose.get('shift_px')} px "
+                "off): stored from here, a watch.bed.roi polygon would keep its place in the frame, not on the plate; "
+                "take it by hand and check the outline: `3d printer bed reference NAME --capture`")
     metrics = verdict.get("metrics") or {}
     seen = metrics.get("bed_in_view")
     if isinstance(seen, (int, float)) and seen < view_min:
