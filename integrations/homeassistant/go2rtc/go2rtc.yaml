@@ -8,7 +8,9 @@ webrtc:
   listen: :8555
   candidates:
     - 192.168.0.39:8555
-    - odroidn2.tailbfe8ea.ts.net:8555
+    # Tailnet candidate comes from GO2RTC_TAILNET_CANDIDATE (<home-tailnet-ip>:8555) in the deployment .env;
+    # unset, it falls back to the LAN candidate (go2rtc leaves an unset variable without a default as literal text).
+    - '${GO2RTC_TAILNET_CANDIDATE:192.168.0.39:8555}'
 
 # >>> 3d ha vision: go2rtc-streams (generated from fleet/printers.yaml; do not edit, run `3d ha vision --write`)
 streams:
