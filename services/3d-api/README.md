@@ -47,7 +47,7 @@ build context by `lib/printops/standalone_script.py`). `compose.yaml` takes its 
 Ports are published on `PRINTOPS_BIND_ADDR`, default `0.0.0.0` (all host interfaces). The Odroid
 sits behind the home router's NAT with no port forwards for these ports, so that means the LAN
 plus the Tailscale tailnet. **Remote access is via Tailscale only**
-(`http://100.116.57.66:8765`, `http://100.116.57.66:7912`); never add a router port-forward or a
+(`http://<odroid-tailnet-ip>:8765`, `http://<odroid-tailnet-ip>:7912`); never add a router port-forward or a
 public reverse proxy for them.
 
 **A host that is not behind such a router** (a laptop on a café network, a VPS) must not publish

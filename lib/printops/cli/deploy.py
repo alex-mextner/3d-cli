@@ -46,7 +46,7 @@ Examples:
   3d printops deploy --dry-run
   3d printops deploy
   3d printops deploy --local --dry-run
-  3d printops deploy --host ultra@odroidn2 --api http://100.116.57.66:8765
+  3d printops deploy --host ultra@odroidn2 --api http://<odroid-tailnet-ip>:8765
   3d printops deploy --local --bind 192.168.0.20     # reachable from the LAN on that address only"""
 
 
