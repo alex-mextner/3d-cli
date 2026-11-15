@@ -61,7 +61,7 @@ when a changed file is not mounted by the service it lists.
 
 The tailnet WebRTC candidate is `${GO2RTC_TAILNET_CANDIDATE:192.168.0.39:8555}` in `go2rtc.yaml`,
 fed by the `go2rtc` service environment in `compose/3d.docker-compose.yaml`. Set
-`GO2RTC_TAILNET_CANDIDATE=<home-tailnet-ip>:8555` in the deployment `.env` to keep WebRTC candidates
+`GO2RTC_TAILNET_CANDIDATE=<odroid-tailnet-address>:8555` (the Odroid's Tailscale DNS name or IP; go2rtc runs on the Odroid) in the deployment `.env` to keep WebRTC candidates
 over the tailnet; without it only the LAN candidate is offered (go2rtc leaves an unset variable
 without a default as literal text, hence the LAN default).
 
