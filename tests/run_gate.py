@@ -41,6 +41,7 @@ SMOKE_TESTS = ("tests/test_imports.py", "tests/test_architecture_structure.py")
 # Changed files no test imports, mapped to the tests that pin them.
 PATH_TESTS: dict[str, tuple[str, ...]] = {
     "bin/3d": ("tests/test_cli_smoke.py",),
+    "integrations/homeassistant/packages/3d_printers.yaml": ("tests/test_ha_printer_layers.py",),
     "rig.yaml": ("tests/test_test_gate_dependencies.py", "tests/test_run_gate.py"),
     "pyproject.toml": ("tests/test_test_gate_dependencies.py",),
     ".github/workflows/ci.yml": ("tests/test_test_gate_dependencies.py",),

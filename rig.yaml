@@ -18,7 +18,7 @@ scripts:
     UV_PROJECT_ENVIRONMENT=.venv
     uv run --with ruff --with pytest --with pytest-cov --with pytest-timeout --with mypy
     --with fastapi --with uvicorn --with markdown --with pyyaml --with httpx --with shapely
-    --with yamllint
+    --with yamllint --with jinja2
     python tests/run_gate.py
 ci:
   enabled: true
