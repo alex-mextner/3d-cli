@@ -197,7 +197,7 @@ def count_prints(printer: str, since: float, history: History) -> PrintCount:
             note = f"{source} unreachable: {type(exc).__name__}: {exc}"
     try:
         starts = print_log.starts_since(printer, since)
-    except (OSError, UnicodeDecodeError) as exc:
+    except OSError as exc:
         starts = 0
         note += f"; start log unreadable: {type(exc).__name__}: {exc}"
     return PrintCount(

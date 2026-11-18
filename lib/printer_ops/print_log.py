@@ -44,22 +44,23 @@ def record_start(printer: str, remote: str, *, at: float | None = None) -> None:
 def starts_since(printer: str, since: float) -> int:
     """How many starts the log holds for `printer` at or after `since` (unix seconds); 0 without a log."""
     try:
-        lines = log_path(printer).read_text(encoding="utf-8").splitlines()
+        lines = log_path(printer).read_bytes().splitlines()
     except FileNotFoundError:
         return 0
+    # Decoding per line (issue #768): one corrupted line must not discard the starts around it.
     return sum(1 for line in lines if (at := _at(line)) is not None and at >= since)
 
 
-def _at(line: str) -> float | None:
+def _at(line: bytes) -> float | None:
     import math
 
     try:
-        value = json.loads(line).get("at")
+        value = json.loads(line.decode("utf-8")).get("at")
         at = (
             float(value)
             if isinstance(value, (int, float)) and not isinstance(value, bool)
             else None
         )
-    except (ValueError, AttributeError, OverflowError):
+    except (ValueError, AttributeError, OverflowError):  # UnicodeDecodeError is a ValueError
         return None
     return at if at is not None and math.isfinite(at) else None
