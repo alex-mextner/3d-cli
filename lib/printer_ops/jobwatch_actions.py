@@ -7,7 +7,8 @@ Order, because every second of a lost print costs filament and a failed print ca
      once per job, verified in the printer state;
   3. RING the owner: `tg call me --say "<russian text>"`;
   4. the klippy.log lines of the job (`3d printer evidence`, GET only) into the same folder;
-  5. TELL the owner: `tg --tag problem --photo FRAME "<text>"` (the frame that showed it).
+  5. TELL the owner: `tg --tag problem --photo FRAME "<text>"` (the frame that showed it), with the glue line of
+     printer_ops/glue.py when a fresh glue layer is due on the plate (and the command that records it).
 Every step runs even when an earlier one failed: a failed cancel still calls, a failed call still messages.
 The outcome (what was sent, what was verified, which step failed) is printed as one JSON line and saved as
 `outcome.json` next to the evidence.
@@ -120,6 +121,7 @@ class Responder:
         verify_s: float = 20.0,
         evidence_fn: Callable[[str, str | None, Path], str] | None = None,
         echo: Callable[[str], None] = print,
+        glue_note: Callable[[str], str | None] | None = None,
     ) -> None:
         self.adapter, self.bound = adapter, bound
         self.out_dir, self.dry_run, self.tg_dry_run = (
@@ -131,6 +133,7 @@ class Responder:
         self.clock, self.sleep, self.verify_s = clock, sleep, verify_s
         self.evidence_fn = evidence_fn or klippy_evidence
         self.echo = echo
+        self.glue_note = glue_note or (lambda printer: glue_tg_note(printer, adapter))
         self.acted = False  # PAUSE/CANCEL goes out once per watch
 
     # -- 1. files
@@ -311,7 +314,8 @@ class Responder:
             self.call(text, out)
         if action in ("pause", "cancel"):
             self.job_evidence(d, out)
-        self.message(text + f"\nEvidence: {d}", frame, out)
+        glue = self.glue_note(self.bound.printer)
+        self.message(text + (f"\n{glue}" if glue else "") + f"\nEvidence: {d}", frame, out)
         (d / "outcome.json").write_text(
             json.dumps(out.to_json(), indent=1, default=str) + "\n", encoding="utf-8"
         )
@@ -359,6 +363,14 @@ def klippy_evidence(printer: str, job_id: str | None, d: Path) -> str:
     with contextlib.redirect_stdout(buf):
         rc = evidence(argv)
     return f"rc {rc}: " + (buf.getvalue().strip().splitlines() or ["evidence saved"])[0]
+
+
+def glue_tg_note(printer: str, adapter: Adapter) -> str | None:
+    """The glue line of the message when a fresh layer is due (printer_ops/glue.py; never raises); prints are
+    counted from the job history of the watched printer."""
+    from printer_ops.glue import adapter_history, tg_note
+
+    return tg_note(printer, history_for=lambda _name: adapter_history(adapter))
 
 
 def _real_runner() -> Runner:
