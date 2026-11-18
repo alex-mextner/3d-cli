@@ -485,7 +485,7 @@ def test_the_stream_modes_follow_the_camera_kind() -> None:
     assert ha_vision.render_dashboard(direct).count(
         "mode: "
     ) == 1 and ".play {display: none" in ha_vision.render_dashboard(direct)
-    assert "custom:webrtc-camera" not in ha_vision.render_dashboard(
+    assert "custom:printer-webrtc-camera" not in ha_vision.render_dashboard(
         none
     ) and "no live stream" in ha_vision.render_dashboard(none)
     assert (

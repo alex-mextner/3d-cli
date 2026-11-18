@@ -22,4 +22,4 @@ webrtc:
   commit: ec268cd05e8c09280e2bcdd4b40c22146cca8361
   domain: webrtc
   version: v3.6.1
-  used_by: custom:webrtc-camera card on the 3D dashboard (u1_camera)
+  used_by: legacy integration resource and the pinned printer-webrtc-camera bundle (both printer cameras)

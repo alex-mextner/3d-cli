@@ -33,6 +33,12 @@ rest:
           - filament_motion_sensor e3_filament
 
 rest_command:
+  # Read the slicer's cached metadata; no G-code or printer state is changed.
+  printer_k1_se_file_metadata:
+    url: >-
+      http://192.168.0.27:7125/server/files/metadata?filename={{ filename | urlencode }}
+    method: get
+    timeout: 5
   printer_u1_pause:
     url: "http://192.168.0.26:7125/printer/print/pause"
     method: post
@@ -167,6 +173,87 @@ script:
       - action: rest_command.printer_u1_emergency_stop
 
 template:
+  # Stock Creality firmware can report TotalLayer=0 for Orca G-code even though
+  # Moonraker has parsed its layer_count. Reuse incoming status events to fetch
+  # that metadata per file/status revision, including pause/resume or reconnect.
+  # Existing progress/time attributes drive opportunistic retries: at most three,
+  # at least 30 seconds apart. A quiet idle printer does not schedule new retries.
+  # Completion events catch a newer job skipped while a previous lookup was running.
+  # No timer polls the printer; replies are bound to both filename and status revision.
+  - triggers:
+      - trigger: state
+        entity_id: sensor.k1se_85b6_print_status
+      - trigger: state
+        entity_id: sensor.printer_k1_se_file_layers
+        attribute: completed_at
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+    variables:
+      filename: "{{ state_attr('sensor.k1se_85b6_print_status', 'file') | default('', true) }}"
+      filename_allowed: >-
+        {{ filename != '' and (filename.startswith('/usr/data/printer_data/gcodes/')
+           or not filename.startswith('/')) }}
+      metadata_filename: "{{ filename.removeprefix('/usr/data/printer_data/gcodes/') }}"
+      revision: >-
+        {%- set status = states.sensor.k1se_85b6_print_status -%}
+        {{ status.last_changed.isoformat() if status is defined and status is not none else '' }}
+      refresh: "{{ trigger.platform != 'state' }}"
+      cache_invalidated: >-
+        {{ refresh or state_attr('sensor.printer_k1_se_file_layers', 'file') != filename
+           or state_attr('sensor.printer_k1_se_file_layers', 'revision') != revision }}
+      attempts: >-
+        {{ 0 if cache_invalidated
+           else state_attr('sensor.printer_k1_se_file_layers', 'attempts') | int(0) }}
+      retry_due: >-
+        {{ states('sensor.printer_k1_se_file_layers') | int(0) <= 0 and attempts < 3
+           and as_timestamp(now()) - (state_attr('sensor.printer_k1_se_file_layers', 'attempted_at') | float(0)) >= 30 }}
+    conditions:
+      - condition: template
+        value_template: "{{ filename_allowed and (cache_invalidated or retry_due) }}"
+    actions:
+      - variables:
+          metadata_response: {}
+          attempted_at: "{{ as_timestamp(now()) }}"
+          attempts: "{{ attempts + 1 }}"
+      - action: rest_command.printer_k1_se_file_metadata
+        continue_on_error: true
+        data:
+          filename: "{{ metadata_filename }}"
+        response_variable: metadata_response
+      - variables:
+          request_current: >-
+            {{ state_attr('sensor.k1se_85b6_print_status', 'file') == filename
+               and states.sensor.k1se_85b6_print_status.last_changed.isoformat() == revision }}
+    sensor:
+      - name: "Printer K1 SE File Layers"
+        unique_id: printer_k1_se_file_layers
+        icon: mdi:layers-triple
+        state: >-
+          {%- if not request_current | default(false) -%}
+          {{ states('sensor.printer_k1_se_file_layers') | int(none) }}
+          {%- else -%}
+          {%- set response = metadata_response | default({}) -%}
+          {%- set content = response.get('content', {}) if response is mapping else {} -%}
+          {%- set metadata = content.get('result', {}) if content is mapping else {} -%}
+          {%- set layers = metadata.get('layer_count') | int(0) if metadata is mapping else 0 -%}
+          {{ layers if response is mapping and response.get('status') == 200
+             and metadata is mapping and metadata.get('filename') == metadata_filename
+             and layers > 0 else none }}
+          {%- endif -%}
+        attributes:
+          file: "{{ filename if request_current | default(false) else state_attr('sensor.printer_k1_se_file_layers', 'file') }}"
+          revision: "{{ revision if request_current | default(false) else state_attr('sensor.printer_k1_se_file_layers', 'revision') }}"
+          attempts: >-
+            {{ attempts if request_current | default(false)
+               else state_attr('sensor.printer_k1_se_file_layers', 'attempts') | int(0) }}
+          attempted_at: >-
+            {{ attempted_at if request_current | default(false)
+               else state_attr('sensor.printer_k1_se_file_layers', 'attempted_at') | float(0) }}
+          completed_at: >-
+            {{ as_timestamp(now()) if metadata_response is defined
+               else state_attr('sensor.printer_k1_se_file_layers', 'completed_at') | float(0) }}
   - sensor:
       - name: "Printer K1 SE Status"
         unique_id: printer_k1_se_status
@@ -199,10 +286,23 @@ template:
         icon: mdi:layers
         state: "{{ states('sensor.k1se_85b6_working_layer') | int(0) }}"
 
+      # Missing metadata is unknown, including while idle; zero is not a real total.
       - name: "Printer K1 SE Total Layers"
         unique_id: printer_k1_se_total_layers
         icon: mdi:layers-triple
-        state: "{{ states('sensor.k1se_85b6_total_layers') | int(0) }}"
+        state: >-
+          {%- set live = states('sensor.k1se_85b6_total_layers') | int(0) -%}
+          {%- set cached = states('sensor.printer_k1_se_file_layers') | int(0) -%}
+          {%- set filename = state_attr('sensor.k1se_85b6_print_status', 'file') -%}
+          {%- if live > 0 -%}
+          {{ live }}
+          {%- elif cached > 0 and filename
+             and state_attr('sensor.printer_k1_se_file_layers', 'file') == filename
+             and state_attr('sensor.printer_k1_se_file_layers', 'revision') == states.sensor.k1se_85b6_print_status.last_changed.isoformat() -%}
+          {{ cached }}
+          {%- else -%}
+          {{ none }}
+          {%- endif -%}
 
       - name: "Printer K1 SE Nozzle Temperature"
         unique_id: printer_k1_se_nozzle_temperature

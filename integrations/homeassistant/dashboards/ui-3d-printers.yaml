@@ -82,7 +82,7 @@ views:
           # K1 SE: go2rtc stream k1se_camera, served by the printer's own streamer. Its JPEG frames are
           # rejected by WebRTC/MSE ("codecs not matched"); MJPEG mode relays them over the HA websocket
           # unchanged, so phones play it without a transcode. Controls sit top-right.
-          - type: custom:webrtc-camera
+          - type: custom:printer-webrtc-camera
             title: K1 SE Camera
             server: http://go2rtc:1984/
             muted: true
@@ -195,7 +195,7 @@ views:
           # >>> 3d ha vision: dashboard:u1 (generated from fleet/printers.yaml; do not edit, run `3d ha vision --write`)
           # The camera proxy bakes the inspector status into the bottom band of every frame, so the
           # player controls move top-right; the stream is switched via the mode label (top-right).
-          - type: custom:webrtc-camera
+          - type: custom:printer-webrtc-camera
             title: U1 Camera
             server: http://go2rtc:1984/
             muted: true

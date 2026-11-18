@@ -64,6 +64,8 @@ files:
   - {src: docs/u1-print-inspector-verification.md, dest: docs/u1-print-inspector-verification.md, mode: symlink}
   - {src: docs/printops-tasks.md, dest: docs/printops-tasks.md, mode: symlink}
   - {src: docs/3d-printing-product-vision-and-journey.md, dest: docs/3d-printing-product-vision-and-journey.md, mode: symlink}
+  - {src: www/printer-cards/printer-cards-bootstrap.js, dest: www/printer-cards/printer-cards-bootstrap.js, mode: copy}
+  - {src: www/printer-cards/printer-cards.bundle.js, dest: www/printer-cards/printer-cards.bundle.js, mode: copy}
   - {src: www/u1-share/share-common.js, dest: www/u1-share/share-common.js, mode: copy}
   - {src: www/u1-share/u1-inspector-card.js, dest: www/u1-share/u1-inspector-card.js, mode: copy}
   - {src: www/u1-share/u1-share-card.js, dest: www/u1-share/u1-share-card.js, mode: copy}
@@ -81,3 +83,5 @@ internal:
   - README.md
   - compose/
   - tests/
+  - vendor/
+  - scripts/build_printer_cards.py

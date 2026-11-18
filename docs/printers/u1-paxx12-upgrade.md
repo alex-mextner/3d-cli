@@ -248,7 +248,7 @@ calibration on screen, or compare against the backup JSON and restore it over SS
 1. **Native camera → go2rtc.** firmware-config **Camera RTSP Stream: Enabled** gives
    `rtsp://192.168.0.26:8554/stream` (H.264, hardware-encoded). In `go2rtc.yaml` replace the ffmpeg
    chain from `u1-camera-proxy` with `u1_camera: rtsp://192.168.0.26:8554/stream`; the HA
-   `custom:webrtc-camera` card stays the same. Keep the internal camera at `1080p25` or lower (fixed
+   `custom:printer-webrtc-camera` card stays the same. Keep the internal camera at `1080p25` or lower (fixed
    1080p is needed for AI detection; framerate can drop to `1080p15` if the CPU suffers). Then
    `u1-camera-proxy` only keeps the share/overlay features or can be retired.
 2. **Spoolman via SpoolLink** (needs [#158](https://github.com/alex-mextner/3d-cli/issues/158) deployed: Spoolman 0.27 on the Odroid,
