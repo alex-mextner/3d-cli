@@ -39,10 +39,48 @@ jobs:
           uv run python -c 'import sys; sys.path.insert(0, "tests"); import run_gate; sys.exit(run_gate.run_shellcheck("."))'
       - name: Run yamllint (Home Assistant integration)
         run: uv run yamllint --strict -c integrations/homeassistant/.yamllint integrations/homeassistant
+      - name: Set up Node for custom-card module regressions
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Run pytest with coverage
         run: uv run pytest tests/ integrations/homeassistant/tests/ --cov=lib --cov-fail-under=80 -q
       - name: Run mypy
         run: uv run mypy lib/ tests/ packages/threed-vision/src/threed_vision
+
+  printer-cards-browser:
+    name: Printer card recovery (Chromium and WebKit)
+    runs-on: ubuntu-24.04
+    container:
+      image: mcr.microsoft.com/playwright:v1.56.1-noble@sha256:f1e7e01021efd65dd1a2c56064be399f3e4de00fd021ac561325f2bfbb2b837a
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: integrations/homeassistant/tests/printer_cards_browser
+    env:
+      PRINTER_CARD_INTEGRATION: ${{ github.workspace }}/integrations/homeassistant
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install pinned fixture dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the pinned Home Assistant renderer fixture
+        run: npm run build:fixture
+      - name: Verify actual loading and retry rendering
+        run: npm test
+      - name: Upload isolated before and after evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: printer-card-browser-recovery-${{ github.sha }}
+          path: integrations/homeassistant/tests/printer_cards_browser/test-results/
+          if-no-files-found: warn
 
   local-cad:
     name: Local CAD (${{ matrix.os }})

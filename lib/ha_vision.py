@@ -145,6 +145,18 @@ def load_settings(root: Path) -> Settings:
     )
 
 
+def _check_camera_slug(
+    printers: list[VisionPrinter], name: str, title: str, model: str
+) -> None:
+    clash = [p.name for p in printers if p.slug == slug_of(title)]
+    if clash:
+        raise GateFailure(
+            f"fleet printers {clash[0]} and {name} share the Home Assistant name {title!r} (model {model})",
+            command=CMD,
+            remediation=["Give the two models distinct names in fleet/printers.yaml / lib/data/printers.yaml."],
+        )
+
+
 def camera_printers(fleet: Any, settings: Settings) -> list[VisionPrinter]:
     """Every contactable fleet printer with a camera, in fleet-file order (stable proxy ports)."""
     from printer_ops.camera import MONITOR, camera_spec
@@ -166,13 +178,7 @@ def camera_printers(fleet: Any, settings: Settings) -> list[VisionPrinter]:
         if spec.kind == MONITOR or ghost:
             proxy_port, next_port = next_port, next_port + 1
         title = title_of(printer.model)
-        clash = [o.name for o in out if o.slug == slug_of(title)]
-        if clash:
-            raise GateFailure(
-                f"fleet printers {clash[0]} and {name} share the Home Assistant name {title!r} (model {printer.model})",
-                command=CMD,
-                remediation=["Give the two models distinct names in fleet/printers.yaml / lib/data/printers.yaml."],
-            )
+        _check_camera_slug(out, name, title, printer.model)
         out.append(
             VisionPrinter(
                 name,
@@ -330,6 +336,19 @@ def _grabber(p: VisionPrinter, url: str) -> str:
 """
 
 
+def _ghost_package(ghosts: list[VisionPrinter]) -> str:
+    if not ghosts:
+        return ""
+    body = "\nrest_command:\n" + "".join(_ghost_command(p) for p in ghosts)
+    body += "\ninput_boolean:\n" + "".join(_ghost_boolean(p) for p in ghosts)
+    body += (
+        "\nautomation:\n  # A proxy forgets its switch when its container restarts; re-sending every 5 minutes and at\n"
+        "  # HA start brings it back to the helper's position.\n"
+        + "".join(_ghost_automation(p) for p in ghosts)
+    )
+    return body
+
+
 def render_package(printers: list[VisionPrinter], s: Settings) -> str:
     ghosts = [p for p in printers if p.ghost]
     head = """\
@@ -361,14 +380,7 @@ def render_package(printers: list[VisionPrinter], s: Settings) -> str:
     grabbers = [(p, url) for p in printers if (url := frame_url(p))]
     if grabbers:
         body += "\ncommand_line:\n" + "".join(_grabber(p, url) for p, url in grabbers)
-    if ghosts:
-        body += "\nrest_command:\n" + "".join(_ghost_command(p) for p in ghosts)
-        body += "\ninput_boolean:\n" + "".join(_ghost_boolean(p) for p in ghosts)
-        body += (
-            "\nautomation:\n  # A proxy forgets its switch when its container restarts; re-sending every 5 minutes and at\n"
-            "  # HA start brings it back to the helper's position.\n"
-            + "".join(_ghost_automation(p) for p in ghosts)
-        )
+    body += _ghost_package(ghosts)
     return head + body
 
 
@@ -461,7 +473,7 @@ def render_dashboard(p: VisionPrinter) -> str:
     )
     lines = [
         *note,
-        "- type: custom:webrtc-camera",
+        "- type: custom:printer-webrtc-camera",
         f"  title: {p.title} Camera",
         "  server: http://go2rtc:1984/",
         "  muted: true",
@@ -638,6 +650,92 @@ def _load(path: Path) -> Any:
     return load_ha_yaml(path.read_text(encoding="utf-8")) if path.is_file() else None
 
 
+def _read_optional_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _package_mapping_keys(package: Any, key: str, prefix: str = "") -> set[str]:
+    return {
+        f"{prefix}{name}"
+        for block in _walk(package, key)
+        if isinstance(block, dict)
+        for name in block
+    }
+
+
+def _package_automation_ids(package: Any) -> set[str]:
+    return {
+        str(automation.get("id"))
+        for block in _walk(package, "automation")
+        if isinstance(block, list)
+        for automation in block
+    }
+
+
+def _missing_entities(
+    printer: VisionPrinter,
+    sensors: set[str],
+    helpers: set[str],
+    dashboard_entities: set[str],
+) -> list[str]:
+    problems = []
+    for entity in expected_entities(printer):
+        if not entity.startswith("input_boolean.") and entity not in sensors:
+            problems.append(f"{printer.name}: {entity} is not defined in {PACKAGE}")
+        if entity.startswith("input_boolean.") and entity not in helpers:
+            problems.append(f"{printer.name}: {entity} is not defined in {PACKAGE}")
+        if entity not in dashboard_entities:
+            problems.append(f"{printer.name}: {entity} is not on the dashboard ({DASHBOARD})")
+    return problems
+
+
+def _missing_vision_status(
+    printer: VisionPrinter, resources: set[str], unique: set[str]
+) -> list[str]:
+    problems = []
+    if not any(r.endswith(f"/v1/printers/{printer.name}/vision") for r in resources):
+        problems.append(f"{printer.name}: no REST resource of /v1/printers/{printer.name}/vision in {PACKAGE}")
+    grabber = expected_grabber(printer)
+    if grabber is not None and grabber not in unique:
+        problems.append(f"{printer.name}: command_line sensor {grabber} (alert frame grabber) is not defined in {PACKAGE}")
+    return problems
+
+
+def _missing_ghost(
+    printer: VisionPrinter, commands: set[str], automations: set[str]
+) -> list[str]:
+    problems: list[str] = []
+    if not printer.ghost:
+        return problems
+    if f"{printer.name}_camera_ghost_set" not in commands:
+        problems.append(f"{printer.name}: rest_command.{printer.name}_camera_ghost_set is not defined in {PACKAGE}")
+    if f"{printer.name}_camera_ghost_sync" not in automations:
+        problems.append(f"{printer.name}: automation {printer.name}_camera_ghost_sync is not defined in {PACKAGE}")
+    return problems
+
+
+def _missing_camera(
+    printer: VisionPrinter,
+    streams: Any,
+    services: Any,
+    dashboard_streams: set[str],
+    dashboard_text: str,
+) -> list[str]:
+    problems = []
+    if printer.stream not in streams:
+        problems.append(f"{printer.name}: go2rtc stream {printer.stream} is not in {GO2RTC}")
+    if (printer.stream in dashboard_streams) is not bool(printer.proxied or printer.streams):
+        problems.append(f"{printer.name}: the dashboard camera card of stream {printer.stream} is "
+                        f"{'missing' if printer.proxied or printer.streams else 'present without a live stream'}")
+    if printer.proxied and printer.proxy_service not in services:
+        problems.append(f"{printer.name}: compose service {printer.proxy_service} is not in {COMPOSE}")
+    if not printer.proxied and printer.proxy_service in services:
+        problems.append(f"{printer.name}: compose service {printer.proxy_service} exists but the printer needs no proxy")
+    if find_region(dashboard_text, f"dashboard:{printer.name}") is None:
+        problems.append(f"{printer.name}: no `dashboard:{printer.name}` region in {DASHBOARD}")
+    return problems
+
+
 def missing(root: Path, printers: list[VisionPrinter]) -> list[str]:
     """Everything the camera printers need in the COMMITTED files and that is not there: package
     sensors / ghost helpers / ghost service+automation, the go2rtc stream, the proxy service, the
@@ -646,47 +744,22 @@ def missing(root: Path, printers: list[VisionPrinter]) -> list[str]:
     package = _load(root / PACKAGE)
     unique = {str(u) for u in _walk(package, "unique_id")}
     sensors = {f"{d}.{u}" for u in unique for d in ("sensor", "binary_sensor")}
-    helpers = {f"input_boolean.{k}" for b in _walk(package, "input_boolean") if isinstance(b, dict) for k in b}
-    commands = {str(k) for b in _walk(package, "rest_command") if isinstance(b, dict) for k in b}
-    automations = {str(a.get("id")) for b in _walk(package, "automation") if isinstance(b, list) for a in b}
+    helpers = _package_mapping_keys(package, "input_boolean", "input_boolean.")
+    commands = _package_mapping_keys(package, "rest_command")
+    automations = _package_automation_ids(package)
     resources = {str(r) for r in _walk(package, "resource")}
     streams = (_load(root / GO2RTC) or {}).get("streams") or {}
     services = (_load(root / COMPOSE) or {}).get("services") or {}
     dashboard = _load(root / DASHBOARD)
     dash_entities = {str(e) for e in _walk(dashboard, "entity")}
     dash_streams = {str(s) for s in _walk(dashboard, "url")}
-    dash_text = (root / DASHBOARD).read_text(encoding="utf-8") if (root / DASHBOARD).is_file() else ""
+    dash_text = _read_optional_text(root / DASHBOARD)
     for p in printers:
-        where = p.name
-        for entity in expected_entities(p):
-            if not entity.startswith("input_boolean.") and entity not in sensors:
-                problems.append(f"{where}: {entity} is not defined in {PACKAGE}")
-            if entity.startswith("input_boolean.") and entity not in helpers:
-                problems.append(f"{where}: {entity} is not defined in {PACKAGE}")
-            if entity not in dash_entities:
-                problems.append(f"{where}: {entity} is not on the dashboard ({DASHBOARD})")
-        if not any(r.endswith(f"/v1/printers/{p.name}/vision") for r in resources):
-            problems.append(f"{where}: no REST resource of /v1/printers/{p.name}/vision in {PACKAGE}")
-        grabber = expected_grabber(p)
-        if grabber is not None and grabber not in unique:
-            problems.append(f"{where}: command_line sensor {grabber} (alert frame grabber) is not defined in {PACKAGE}")
-        if p.ghost:
-            if f"{p.name}_camera_ghost_set" not in commands:
-                problems.append(f"{where}: rest_command.{p.name}_camera_ghost_set is not defined in {PACKAGE}")
-            if f"{p.name}_camera_ghost_sync" not in automations:
-                problems.append(f"{where}: automation {p.name}_camera_ghost_sync is not defined in {PACKAGE}")
-        if p.stream not in streams:
-            problems.append(f"{where}: go2rtc stream {p.stream} is not in {GO2RTC}")
-        if (p.stream in dash_streams) is not bool(p.proxied or p.streams):
-            problems.append(f"{where}: the dashboard camera card of stream {p.stream} is "
-                            f"{'missing' if p.proxied or p.streams else 'present without a live stream'}")
-        if p.proxied and p.proxy_service not in services:
-            problems.append(f"{where}: compose service {p.proxy_service} is not in {COMPOSE}")
-        if not p.proxied and p.proxy_service in services:
-            problems.append(f"{where}: compose service {p.proxy_service} exists but the printer needs no proxy")
-        if find_region(dash_text, f"dashboard:{p.name}") is None:
-            problems.append(f"{where}: no `dashboard:{p.name}` region in {DASHBOARD}")
-    manifest = (root / MANIFEST).read_text(encoding="utf-8") if (root / MANIFEST).is_file() else ""
+        problems.extend(_missing_entities(p, sensors, helpers, dash_entities))
+        problems.extend(_missing_vision_status(p, resources, unique))
+        problems.extend(_missing_ghost(p, commands, automations))
+        problems.extend(_missing_camera(p, streams, services, dash_streams, dash_text))
+    manifest = _read_optional_text(root / MANIFEST)
     if printers and f"src: {PACKAGE.relative_to(INTEGRATION)}" not in manifest:
         problems.append(f"{PACKAGE.relative_to(INTEGRATION)} is not a `files` entry of {MANIFEST}")
     return problems

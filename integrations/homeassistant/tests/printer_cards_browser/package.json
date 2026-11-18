@@ -1,0 +1,18 @@
+{
+  "name": "isolated-printer-card-recovery-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:fixture": "python3 build-native-entry.py",
+    "test": "playwright test --workers=1 --reporter=line"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "@lit/context": "1.1.6",
+    "@mdi/js": "7.4.47",
+    "@webcomponents/scoped-custom-element-registry": "0.0.10",
+    "esbuild": "0.25.12",
+    "lit": "3.3.3",
+    "yaml": "2.8.1"
+  }
+}

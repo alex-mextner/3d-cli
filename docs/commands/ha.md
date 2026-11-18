@@ -44,9 +44,9 @@ Issue: [#156](https://github.com/alex-mextner/3d-cli/issues/156).
 | `proxy/printer-proxy.nginx.conf` | `printer-proxy.nginx.conf` | symlink; `printer-proxy` recreated on change |
 | `go2rtc/go2rtc.yaml` | `go2rtc.yaml` | symlink; `go2rtc` recreated on change |
 | `docs/*.md` | `docs/` | symlink |
-| `www/u1-share/*` | `www/u1-share/` | tracked copy |
+| `www/u1-share/*`, `www/printer-cards/*` | matching `www/` directories | tracked copy |
 | `compose/3d.docker-compose.yaml` | — | `ha.docker-compose.yaml` lists it under `include:` |
-| `snippets/configuration.3d.yaml` | — | the 3D keys of `configuration.yaml` (ingress panels, Lovelace dashboard and resources); checked, never copied |
+| `snippets/configuration.3d.yaml` | — | the 3D keys of `configuration.yaml` (ingress panels, frontend bootstrap, Lovelace dashboard and resources); checked, never copied |
 | `vendor.lock` | — | pins of moonraker-home-assistant 1.13.4, ha_creality_ws 0.9.9, WebRTC v3.6.1; checked against the live `manifest.json` versions and submodule commits |
 | `manifest.yaml` | — | the table above, plus the HA-repo settings `3d ha deploy` uses |
 

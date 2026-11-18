@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/AlexxIT/WebRTC",
+  "commit": "ec268cd05e8c09280e2bcdd4b40c22146cca8361",
+  "version": "3.6.1",
+  "license": "MIT; see LICENSE. DigitalPTZ retains its original dbuezas/pan-zoom-controller attribution.",
+  "sha256": {
+    "LICENSE": "4639655e94c962778ef8fc2d211c656670000ea4b5116cbf6a37288a435dee01",
+    "webrtc-camera.js": "b017099b9e608233982ad8dbcf512bc68a7acf01de379dae9617c045e3f9cb62",
+    "video-rtc.js": "c4f7382ad539d6d1e0b2c2c154a8c5bab609ddb63fe408964792a3d3eac92441",
+    "digital-ptz.js": "f511b3f9079a2ea111f2adec39631abc36974f65054de07cf8af381c79ee0f50"
+  },
+  "upstream_sha256": {
+    "LICENSE": "4639655e94c962778ef8fc2d211c656670000ea4b5116cbf6a37288a435dee01",
+    "webrtc-camera.js": "890287598718824134be6d5d965e62b4630699e8130e5344126cec74baffa4e2",
+    "video-rtc.js": "8fb3b01a17dbd416239eb1939f9df2b1c1ce7b0e75bf334f521c682658a6b482",
+    "digital-ptz.js": "f511b3f9079a2ea111f2adec39631abc36974f65054de07cf8af381c79ee0f50"
+  },
+  "local_changes": {
+    "video-rtc.js": "Extract _rtcHasPriority without changing WebRTC/MSE selection behavior to satisfy repository complexity limits. See the regression cases for video/audio codec priorities.",
+    "webrtc-camera.js": "Remove the extra blank line at EOF to satisfy git whitespace checks; camera logic is unchanged."
+  }
+}

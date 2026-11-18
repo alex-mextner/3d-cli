@@ -101,6 +101,11 @@ class U1ShareCard extends HTMLElement {
       this._el("camera").value = selected;
       this._camerasKey = key;
     }
+    this._syncPublicOrigin();
+    this._el("generate").disabled = this._busy || !cameras.length;
+    if (!cameras.length) this._message("В HA нет camera.*. Сначала подключите камеру U1.");
+  }
+  _syncPublicOrigin() {
     // Never guess the first camera: the owner must explicitly select U1.
     if (!this._el("public").value) {
       const external = this._hass.config?.external_url;
@@ -113,8 +118,6 @@ class U1ShareCard extends HTMLElement {
         }).catch(() => {});
       }
     }
-    this._el("generate").disabled = this._busy || !cameras.length;
-    if (!cameras.length) this._message("В HA нет camera.*. Сначала подключите камеру U1.");
   }
   _invalidate() {
     this._links = null; this._el("result").hidden = true; this._el("link").value = ""; this._message("");
