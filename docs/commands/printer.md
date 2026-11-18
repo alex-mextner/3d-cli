@@ -1370,6 +1370,13 @@ working files (baseline, footprint) live in `~/.local/state/3d-cli/jobwatch/NAME
    `3d print-preflight X.gcode --printer a1mini` (state checks are left out) and
    `--axis-limits a1mini`. A `read-only` printer answers `status` but refuses `upload`, `start`
    and `cancel` before any request is sent.
+8. `upload` and `start` first check the glue on the printer's bed ([`3d glue`](glue.md)): when a
+   fresh glue-stick layer is due (prints or days since the last one, or none on record) they say which
+   limit was reached, ask `Glue applied? [y/N]` on a terminal (`y` records it now) and otherwise print
+   `3d glue applied --printer NAME`. It never refuses. Every acknowledged `start` is appended to
+   `~/.local/state/3d-cli/prints/NAME.jsonl`, the glue count when the printer's history cannot be read.
+   Example: `3d printer start k1se out/part.gcode --yes` → `GLUE DUE on k1se: 5 prints since the glue
+   (limit 5)`.
 
 ### Forcing a start
 
