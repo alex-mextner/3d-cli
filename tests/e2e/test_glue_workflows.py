@@ -131,6 +131,7 @@ def test_glue_status_counts_prints_from_the_printer_history_and_names_the_limit(
 
 
 def test_upload_warns_on_old_glue_and_glue_applied_clears_it(tmp_path: Path) -> None:
+    """The glue went on 8 days ago: upload warns; after `3d glue applied` the next upload says all is fine."""
     moon = FakeMoonraker()
     (tmp_path / "part.gcode").write_text(GCODE, encoding="utf-8")
     with moon.serve():
@@ -182,6 +183,7 @@ def test_unreachable_printer_counts_from_3d_own_start_log(tmp_path: Path) -> Non
 
 
 def test_off_silences_a_printer_and_bad_input_is_refused(tmp_path: Path) -> None:
+    """The owner turns u1's reminder off (uploads go quiet, status says off), then on; bad input is refused."""
     moon = FakeMoonraker()
     (tmp_path / "part.gcode").write_text(GCODE, encoding="utf-8")
     with moon.serve():
@@ -209,6 +211,7 @@ def test_off_silences_a_printer_and_bad_input_is_refused(tmp_path: Path) -> None
 
 
 def test_glue_help_lists_every_flag_with_an_example(tmp_path: Path) -> None:
+    """`3d glue --help` names every flag and shows how to record glue applied at a past time."""
     out = run_cli(tmp_path, "glue", "--help")
     assert out.returncode == 0
     for flag in (
@@ -226,12 +229,15 @@ def test_glue_help_lists_every_flag_with_an_example(tmp_path: Path) -> None:
 
 
 def test_oversized_day_limit_is_refused(tmp_path: Path) -> None:
+    """An absurd day limit is a usage error naming --days, not a stored limit."""
     write_devices(tmp_path / "xdg-config", moon=FakeMoonraker(port=9))
     out = run_cli(tmp_path, "glue", "limits", "--printer", "u1", "--days", "1e308")
-    assert out.returncode == 2 and "--days" in out.stderr
+    assert out.returncode == 2, out.stdout
+    assert "--days" in out.stderr
 
 
 def test_a_malformed_glue_config_entry_is_a_clear_error(tmp_path: Path) -> None:
+    """A hand-edited glue.json entry that is not an object gets a one-line error naming the printer."""
     write_devices(tmp_path / "xdg-config", moon=FakeMoonraker(port=9))
     config = tmp_path / "xdg-config" / "3d-cli" / "glue.json"
     for entry in ("7", '"weekly"', "[[1, 2]]"):
@@ -239,6 +245,5 @@ def test_a_malformed_glue_config_entry_is_a_clear_error(tmp_path: Path) -> None:
         for argv in (("--days", "4"), ("--json",)):
             out = run_cli(tmp_path, "glue", "limits", "--printer", "u1", *argv)
             assert out.returncode != 0, out.stdout
-            assert (
-                "u1 must be an object" in out.stderr and "Traceback" not in out.stderr
-            )
+            assert "u1 must be an object" in out.stderr
+            assert "Traceback" not in out.stderr
