@@ -7,6 +7,7 @@ Deterministic: a fixed clock, job lists in memory or the loopback FakeMoonraker,
 
 from __future__ import annotations
 
+import datetime
 import json
 import time
 from pathlib import Path
@@ -1047,3 +1048,197 @@ def test_an_unformattable_record_never_stops_a_print() -> None:
         "k1se", interactive=False, echo=out.append, history_for=history([])
     )
     assert out and out[0].startswith("glue check skipped: ")
+
+
+def test_prints_after_the_glue_on_a_printer_clock_an_hour_behind_are_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #770: job start times are on the printer's clock; an hour behind hid every print after the glue."""
+    glued = NOW - 1800
+    behind = 3600.0
+    table = [job(glued - behind + 60 * (i + 1)) for i in range(5)]
+    history = _moonraker_table(table)
+
+    def server(method: str, url: str, **k: Any) -> dict[str, Any]:
+        clock = k.get("clock")
+        if clock is not None:
+            clock.append((NOW - behind, NOW))
+        return history(method, url, **k)
+
+    monkeypatch.setattr(G, "_get_json", server)
+    count = G.count_prints("k1se", glued, G.adapter_history(_moon()))
+    assert (count.count, count.exact) == (5, False)
+    assert "printer clock is 1h 00m behind" in count.note
+
+
+def test_a_printer_clock_within_a_minute_keeps_the_count_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = [job(NOW - 600 + i) for i in range(3)]
+    history = _moonraker_table(table)
+
+    def server(method: str, url: str, **k: Any) -> dict[str, Any]:
+        clock = k.get("clock")
+        if clock is not None:
+            clock.append((NOW - 30, NOW))
+        return history(method, url, **k)
+
+    monkeypatch.setattr(G, "_get_json", server)
+    count = G.count_prints("k1se", NOW - 3600, G.adapter_history(_moon()))
+    assert (count.count, count.exact) == (3, True)
+
+
+def test_the_reply_date_header_is_read_as_the_printer_clock() -> None:
+    clock: list[tuple[float, float]] = []
+    G._record_date("Thu, 15 Jan 2027 08:00:00 GMT", clock)
+    G._record_date("not a date", clock)
+    G._record_date(None, clock)
+    assert [c[0] for c in clock] == [
+        datetime.datetime(2027, 1, 15, 8, tzinfo=datetime.timezone.utc).timestamp()
+    ]
+
+
+def _behind_printer(history: Any, behind: float, calls: list[str]) -> Any:
+    """A Moonraker double whose Date header says its clock is `behind` seconds behind this computer."""
+
+    def server(method: str, url: str, **k: Any) -> dict[str, Any]:
+        calls.append(url)
+        clock = k.get("clock")
+        if clock is not None:
+            clock.append((NOW - behind, NOW))
+        return history(method, url, **k)
+
+    return server
+
+
+def test_a_failed_read_on_the_printer_clock_keeps_the_prints_the_first_read_saw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    glued = NOW - 7200
+    table = [job(NOW - 600 + i) for i in range(5)]  # after the glue on either clock
+    history = _moonraker_table(table)
+    calls: list[str] = []
+
+    def reset_after_the_first(method: str, url: str, **k: Any) -> dict[str, Any]:
+        if len(calls) > 1:  # the double records the call before it gets here
+            raise ConnectionResetError("reset")
+        return history(method, url, **k)
+
+    monkeypatch.setattr(
+        G, "_get_json", _behind_printer(reset_after_the_first, 3600, calls)
+    )
+    count = G.count_prints("k1se", glued, G.adapter_history(_moon()))
+    assert (count.count, count.exact) == (5, False)
+    assert "ConnectionResetError" in count.note
+
+
+def test_the_read_on_the_printer_clock_shares_the_history_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = _moonraker_table([job(NOW - 600)])
+    calls: list[str] = []
+
+    def slow(method: str, url: str, **k: Any) -> dict[str, Any]:
+        time.sleep(0.3)
+        return history(method, url, **k)
+
+    monkeypatch.setattr(G, "HISTORY_DEADLINE_S", 0.2)
+    monkeypatch.setattr(G, "_get_json", _behind_printer(slow, 3600, calls))
+    count = G.count_prints("k1se", NOW - 7200, G.adapter_history(_moon()))
+    assert len(calls) == 1
+    assert not count.exact and "did not answer" in count.note
+
+
+def test_an_overflowing_date_header_is_ignored() -> None:
+    clock: list[tuple[float, float]] = []
+    G._record_date("Fri, 01 Jan 999999999999999999999 00:00:00 GMT", clock)
+    assert clock == []
+
+
+def test_a_printer_clock_ahead_never_hides_prints_after_the_glue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clock may have been right when it printed and jumped ahead later: keep the host cutoff."""
+    glued = NOW - 3600
+    table = [job(glued + 60 * (i + 1)) for i in range(5)]
+    calls: list[str] = []
+    monkeypatch.setattr(
+        G, "_get_json", _behind_printer(_moonraker_table(table), -3600, calls)
+    )
+    count = G.count_prints("k1se", glued, G.adapter_history(_moon()))
+    assert (count.count, count.exact) == (5, False)
+    assert "printer clock is 1h 00m ahead of" in count.note
+
+
+def test_a_print_just_after_the_glue_on_a_clock_seconds_behind_is_counted_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    glued = NOW - 600
+    calls: list[str] = []
+    table = [job(glued + 10 - 30)]  # 10 s after the glue, on a clock 30 s behind
+    monkeypatch.setattr(
+        G, "_get_json", _behind_printer(_moonraker_table(table), 30, calls)
+    )
+    count = G.count_prints("k1se", glued, G.adapter_history(_moon()))
+    assert (count.count, count.exact) == (1, True)
+
+
+def test_a_retry_row_without_metrics_keeps_the_print_the_first_read_classified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    glued = NOW - 7200
+    table = [job(NOW - 600 + i) for i in range(5)]
+    history = _moonraker_table(table)
+    calls: list[str] = []
+
+    def metrics_gone_on_retry(method: str, url: str, **k: Any) -> dict[str, Any]:
+        reply = history(method, url, **k)
+        if len(calls) > 1:  # the double records the call before it gets here
+            jobs = reply["result"]["jobs"]
+            reply["result"]["jobs"] = [
+                {
+                    key: v
+                    for key, v in j.items()
+                    if key not in ("print_duration", "filament_used")
+                }
+                for j in jobs
+            ]
+        return reply
+
+    monkeypatch.setattr(
+        G, "_get_json", _behind_printer(metrics_gone_on_retry, 3600, calls)
+    )
+    count = G.count_prints("k1se", glued, G.adapter_history(_moon()))
+    assert (count.count, count.exact) == (5, False)
+
+
+def test_date_header_rounding_keeps_the_exact_glue_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whole-second Date makes a right clock look up to a second behind: not a skew to correct."""
+    glued = NOW - 600
+    calls: list[str] = []
+    table = [job(glued - 0.5), job(glued + 0.15)]
+    monkeypatch.setattr(
+        G, "_get_json", _behind_printer(_moonraker_table(table), 0.9, calls)
+    )
+    count = G.count_prints("k1se", glued, G.adapter_history(_moon()))
+    assert (count.count, count.exact) == (1, True)
+    assert len(calls) == 1
+
+
+def test_a_first_read_failure_stays_after_a_clean_read_on_the_printer_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = _moonraker_table([job(NOW - 600 + i) for i in range(3)])
+    calls: list[str] = []
+
+    def reset_first(method: str, url: str, **k: Any) -> dict[str, Any]:
+        if len(calls) == 1:  # the double records the call before it gets here
+            raise ConnectionResetError("reset")
+        return history(method, url, **k)
+
+    monkeypatch.setattr(G, "_get_json", _behind_printer(reset_first, 30, calls))
+    count = G.count_prints("k1se", NOW - 7200, G.adapter_history(_moon()))
+    assert (count.count, count.exact) == (3, False)
+    assert "ConnectionResetError" in count.note
