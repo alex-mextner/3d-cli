@@ -545,6 +545,7 @@ per-OS install command (e.g. `brew install --cask orcaslicer`) — never broken.
 | `3d fits list\|show\|resolve\|apply\|corrections` | fit tolerances per fit type (snap / sliding / tight / press / glue) corrected for printer x material, with the provenance of every number; `3d fit-check --fit` and `3d fit-niche --fit` use the same table ([docs](docs/commands/fits.md)). |
 | `3d printers list\|show` | inspect printer models (bed, nozzle, firmware); `show u1` is the one-screen dossier of a fleet printer: machine, web UIs, live status, job queue, job history. |
 | `3d printers spools\|load\|unload\|swap\|filament` | which spool is in which printer (remaining interval, Moonraker active-spool agreement), put one in, take it out, swap it; `--dry-run` and `--json` everywhere ([docs](docs/commands/printers.md)). |
+| `3d glue status\|applied\|limits` | the glue-stick reminder per printer: due after N prints (from the printer's job history, so Orca and touchscreen prints count) or D days, whichever comes first (default 5 / 7), or none on record; `printer upload/start` warn and ask "Glue applied? [y/N]" ([docs](docs/commands/glue.md)). |
 | `3d printers doctor [PRINTER\|--all] [--fix]` | diagnose a printer's setup (Klippy, Moonraker, Spoolman link and CORS, active spool, camera, watch services, ...); `--fix` repairs what is safe, risky fixes need `--yes`, manual ones print their steps ([docs](docs/commands/printers-doctor.md)). |
 | `3d printers fw status\|plan\|backup\|apply` | firmware / root / Klipper-unlock per vendor profile (Snapmaker U1, Creality K1, Bambu); dry run by default, `apply --yes` needs a fresh backup, the typed printer name and an idle printer ([docs](docs/commands/printers-fw.md)). |
 | `3d metrics list\|show` | inspect persisted command metrics JSONL records. |
@@ -676,6 +677,9 @@ wrapped around cylinder and cone walls, the successor of
   the projects registry, and registry overrides. (Honors `$XDG_CONFIG_HOME`.)
 - **`~/.local/share/3d-cli/`** — generated state, including the longitudinal metrics store.
   (Honors `$XDG_DATA_HOME`.)
+- **`~/.local/state/3d-cli/`** — runtime state per printer: watch heartbeats, bed references, the glue
+  records (`glue/NAME.json`, limits in `~/.config/3d-cli/glue.json`) and 3d's own start log
+  (`prints/NAME.jsonl`). (Honors `$XDG_STATE_HOME`.)
 
 **Machine budget.** A `3d` run uses at most `THREED_MAX_WORKERS` parallel workers (default
 `min(6, cores / 2)`) for concurrent renders and frames, and caps the native thread pools of

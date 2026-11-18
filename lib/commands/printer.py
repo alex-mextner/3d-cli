@@ -67,6 +67,8 @@ USAGE = """3d printer [-n NAME] <subcommand> [args]
                                        --watch: right after the start, begin `watch NAME --job --yes`
                                        in the background (it may CANCEL the job, so it is never on
                                        by default; without it `start` prints the command to run)
+                                       upload and start first check the glue on the bed: when a fresh
+                                       layer is due they warn and ask "Glue applied? [y/N]" (`3d glue --help`)
   slot set NAME T<n> --material M --color #RRGGBB [--brand B] [--sub-type S] [--dry-run] [--force-official]
                                        [--secs S] [--json]
                                        write the filament one head shows it holds (U1: the touchscreen's
@@ -423,6 +425,25 @@ def _ensure_thumbnails(original: Path) -> None:
               f"(sha256 {old[:12]}… -> {file_sha256(original)[:12]}…)")
 
 
+def _glue_check(name: str, adapter: Adapter) -> None:
+    """Before anything is sent: is a fresh glue layer due on NAME's bed (printer_ops/glue.py, issue #762)?
+    Warns, asks `Glue applied? [y/N]` on a terminal, never refuses. Prints are counted from the job history
+    of the printer this command talks to."""
+    from printer_ops.glue import adapter_history, check_before_print
+
+    check_before_print(name, history_for=lambda _name: adapter_history(adapter))
+
+
+def _log_start(name: str, remote: str) -> None:
+    """3d's own start log: the glue count when the printer's history cannot be read."""
+    from printer_ops.print_log import record_start
+
+    try:
+        record_start(name, remote)
+    except OSError as exc:  # the print has started; a missing log line only weakens a fallback count
+        print(f"note: start not logged ({exc})")
+
+
 def _cmd_upload(argv: list[str]) -> int:
     import shutil
     import tempfile
@@ -444,6 +465,7 @@ def _upload_snapshot(name: str, file: str, local: Path, opts: dict[str, str]) ->
 
     remote = safe_remote_name(local, opts.get("--as"))
     adapter = _adapter(name, opts, write=True)
+    _glue_check(name, adapter)
     st = adapter.status()
     if st.busy and (not adapter.upload_while_busy or st.filename == remote):
         why = "it would overwrite the file being printed" if st.filename == remote else \
@@ -599,6 +621,7 @@ def _start_and_report(adapter: Adapter, name: str, remote: str) -> None:
             command="printer", remediation=dont_resend,
         ) from exc
     print(f"start acknowledged by {name}: {remote}")
+    _log_start(name, remote)
     try:
         after = adapter.status()
     except PrinterCommError as exc:
@@ -650,6 +673,7 @@ def _start_snapshot(name: str, file: str, original: Path, local: Path, source: P
 
     safe_remote_name(local, opts.get("--as"))  # a name the printer would refuse fails before anything is written
     adapter = _adapter(name, opts, write=True)
+    _glue_check(name, adapter)
 
     st = adapter.status()
     _refuse_if_busy(name, st, "before preflight")
