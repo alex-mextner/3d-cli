@@ -241,20 +241,81 @@ def _history_at(base_url: str) -> History:
     base = base_url.rstrip("/")
 
     def jobs_since(since: float) -> list[dict[str, Any]]:
-        # Moonraker filters start_time > since: ask from just before it
-        jobs, failure = _read_history(base, since - 1.0)
+        jobs, failure, since, skew_note = _read_on_printer_clock(base, since)
         since_glue = [
             j
             for j in jobs
             if _finite_number(j.get("start_time")) and j["start_time"] >= since
         ]
-        problem = failure or _first_problem(jobs, since_glue)
+        problem = failure or _first_problem(jobs, since_glue) or skew_note
         if problem:
             known = count_printed([j for j in since_glue if not _metrics_problem(j)])
             raise UncertainHistory(problem, known)
         return since_glue
 
     return jobs_since, f"moonraker {base}/server/history"
+
+
+def _read_on_printer_clock(
+    base: str, since: float
+) -> tuple[list[dict[str, Any]], str | None, float, str | None]:
+    """The history since the glue at host time `since`, read on the printer's clock (issue #770): job
+    start times come from the printer, so a printer clock behind moves the glue time back onto it. A
+    clock ahead keeps the host cutoff: the printer's clock may have been right when it printed, and a
+    later cutoff could hide prints after the glue; an early reminder beats a loose bed. Only a clock
+    more than CLOCK_SKEW_S off is reported (the skew note). The Date header has whole seconds, so a
+    skew within DATE_RESOLUTION_S is rounding and keeps the exact host cutoff. Returns (jobs, why the
+    read stopped early, the cutoff, skew note). Both reads share one HISTORY_DEADLINE_S; a failed
+    second read keeps the jobs the first one saw."""
+    deadline = time.monotonic() + HISTORY_DEADLINE_S
+    clock: list[tuple[float, float]] = []
+    # Moonraker filters start_time > since: ask from just before it
+    jobs, failure = _read_history(base, since - 1.0, deadline, clock)
+    skew = _clock_skew(clock)
+    if skew is None or skew >= -DATE_RESOLUTION_S:
+        note = _skew_note(skew) if skew is not None and skew > CLOCK_SKEW_S else None
+        return jobs, failure, since, note
+    since += skew  # the first read started too late on the printer's clock
+    retry, retry_failure = _read_history(base, since - 1.0, deadline)
+    jobs = _merge_reads(jobs, retry)
+    failure = retry_failure or failure  # a deletion the first read saw still counts
+    return jobs, failure, since, _skew_note(skew) if -skew > CLOCK_SKEW_S else None
+
+
+def _merge_reads(
+    first: list[dict[str, Any]], retry: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Both reads' jobs; the retry row wins unless it cannot be classified while the first read's row
+    is a confirmed print."""
+    merged = {_job_key(j): j for j in first}
+    for j in retry:
+        key = _job_key(j)
+        earlier = merged.get(key)
+        if earlier is None or not printed(earlier) or not _metrics_problem(j):
+            merged[key] = j
+    return list(merged.values())
+
+
+CLOCK_SKEW_S = 60.0  # more than a minute off is a wrong clock worth a note
+DATE_RESOLUTION_S = (
+    2.0  # the HTTP Date header drops the fraction: a second plus the reply latency
+)
+
+
+def _clock_skew(clock: list[tuple[float, float]]) -> float | None:
+    """Printer clock minus this computer's clock from the first reply's Date header; None when unknown."""
+    if not clock:
+        return None
+    printer_now, host_now = clock[0]
+    return printer_now - host_now
+
+
+def _skew_note(skew: float) -> str:
+    side = "behind" if skew < 0 else "ahead of"
+    return (
+        f"says the printer clock is {human(abs(skew))} {side} this computer's; "
+        f"the count may include prints from up to {human(abs(skew))} before the glue"
+    )
 
 
 def _first_problem(
@@ -271,14 +332,22 @@ def _first_problem(
 
 
 def _history_page(
-    base: str, since: float, start: int, timeout: float = HTTP_TIMEOUT_S
+    base: str,
+    since: float,
+    start: int,
+    timeout: float = HTTP_TIMEOUT_S,
+    clock: list[tuple[float, float]] | None = None,
 ) -> list[dict[str, Any]]:
     import urllib.parse
 
     query = urllib.parse.urlencode(
         {"since": f"{since:.3f}", "order": "asc", "limit": HISTORY_PAGE, "start": start}
     )
-    body = _get_json("GET", f"{base}/server/history/list?{query}", timeout=timeout)
+    url = f"{base}/server/history/list?{query}"
+    if clock is None:
+        body = _get_json("GET", url, timeout=timeout)
+    else:
+        body = _get_json("GET", url, timeout=timeout, clock=clock)
     batch = body.get("result", {}).get("jobs") if isinstance(body, dict) else None
     if not isinstance(batch, list) or not all(isinstance(j, dict) for j in batch):
         raise ValueError(f"no job list in the history reply: {str(body)[:120]}")
@@ -288,10 +357,17 @@ def _history_page(
 HISTORY_MAX_BYTES = 32 * 1024 * 1024  # 100 jobs with metadata are well under 1 MB
 
 
-def _get_json(method: str, url: str, *, timeout: float) -> Any:
+def _get_json(
+    method: str,
+    url: str,
+    *,
+    timeout: float,
+    clock: list[tuple[float, float]] | None = None,
+) -> Any:
     """One HTTP request -> parsed JSON within `timeout` overall. Socket timeouts bound each read, not the
     exchange (a server can drip header bytes forever), so the request runs in a daemon thread that is
-    abandoned at the deadline; it dies with the process."""
+    abandoned at the deadline; it dies with the process. `clock` gets (the reply's Date, this computer's
+    time at the reply) when the server sends a Date header."""
     import threading
 
     result: list[Any] = []
@@ -299,7 +375,7 @@ def _get_json(method: str, url: str, *, timeout: float) -> Any:
 
     def run() -> None:
         try:
-            result.append(_get_json_once(method, url, timeout=timeout))
+            result.append(_get_json_once(method, url, timeout=timeout, clock=clock))
         except BaseException as exc:  # handed to the caller's thread
             error.append(exc)
 
@@ -313,7 +389,13 @@ def _get_json(method: str, url: str, *, timeout: float) -> Any:
     return result[0]
 
 
-def _get_json_once(method: str, url: str, *, timeout: float) -> Any:
+def _get_json_once(
+    method: str,
+    url: str,
+    *,
+    timeout: float,
+    clock: list[tuple[float, float]] | None = None,
+) -> Any:
     import urllib.parse
 
     end = time.monotonic() + timeout
@@ -328,6 +410,8 @@ def _get_json_once(method: str, url: str, *, timeout: float) -> Any:
         if conn.sock is not None:
             conn.sock.settimeout(max(0.001, end - time.monotonic()))
         reply = conn.getresponse()
+        if clock is not None:
+            _record_date(reply.getheader("Date"), clock)
         data = bytearray()
         while chunk := reply.read1(65536):
             data += chunk
@@ -343,11 +427,33 @@ def _get_json_once(method: str, url: str, *, timeout: float) -> Any:
     return json.loads(bytes(data) or b"null")
 
 
-def _read_history(base: str, since: float) -> tuple[list[dict[str, Any]], str | None]:
-    """The jobs read and why the read stopped early (None when complete). The whole read, every request
-    included, ends by HISTORY_DEADLINE_S: the job-watch alert waits on it."""
+def _record_date(header: str | None, clock: list[tuple[float, float]]) -> None:
+    import email.utils
+
+    try:
+        date = email.utils.parsedate_to_datetime(header) if header else None
+        printer_now = date.timestamp() if date is not None and date.tzinfo else None
+    except (
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):  # a malformed Date is no clock reading
+        return
+    if printer_now is not None:
+        clock.append((printer_now, time.time()))
+
+
+def _read_history(
+    base: str,
+    since: float,
+    deadline: float,
+    clock: list[tuple[float, float]] | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The jobs read and why the read stopped early (None when complete). The read, every request
+    included, ends by `deadline` (time.monotonic()): the job-watch alert waits on it. `clock` gets the
+    printer's Date of the first reply (see _get_json)."""
     jobs: list[dict[str, Any]] = []
-    stop = _read_pages(base, since, time.monotonic() + HISTORY_DEADLINE_S, jobs)
+    stop = _read_pages(base, since, deadline, jobs, clock)
     if stop == "":
         stop = f"did not answer within {HISTORY_DEADLINE_S:g} s"
     return jobs, stop
@@ -358,7 +464,11 @@ _SHIFTED = "shifted"
 
 
 def _read_pages(
-    base: str, since: float, deadline: float, jobs: list[dict[str, Any]]
+    base: str,
+    since: float,
+    deadline: float,
+    jobs: list[dict[str, Any]],
+    clock: list[tuple[float, float]] | None = None,
 ) -> str | None:
     """Fill `jobs` with the history since `since`; None when complete, "" at the deadline, else why it
     stopped. Moonraker pages by offset in job_id order, so a job deleted between two requests shifts the
@@ -368,7 +478,7 @@ def _read_pages(
     seen: dict[str, dict[str, Any]] = {}
     for _ in range(HISTORY_READ_ATTEMPTS):
         attempt: list[dict[str, Any]] = []
-        stop = _read_pass(base, since, deadline, attempt)
+        stop = _read_pass(base, since, deadline, attempt, clock)
         gone = _merge_attempt(seen, attempt)
         jobs[:] = list(seen.values())
         if stop is None:
@@ -392,10 +502,14 @@ def _merge_attempt(
 
 
 def _read_pass(
-    base: str, since: float, deadline: float, jobs: list[dict[str, Any]]
+    base: str,
+    since: float,
+    deadline: float,
+    jobs: list[dict[str, Any]],
+    clock: list[tuple[float, float]] | None = None,
 ) -> str | None:
     try:
-        return _read_pass_pages(base, since, deadline, jobs)
+        return _read_pass_pages(base, since, deadline, jobs, clock)
     except (
         OSError,
         ValueError,
@@ -408,14 +522,22 @@ def _read_pass(
 
 
 def _read_pass_pages(
-    base: str, since: float, deadline: float, jobs: list[dict[str, Any]]
+    base: str,
+    since: float,
+    deadline: float,
+    jobs: list[dict[str, Any]],
+    clock: list[tuple[float, float]] | None = None,
 ) -> str | None:
     while len(jobs) < HISTORY_PAGE * HISTORY_MAX_PAGES:
         left = deadline - time.monotonic()
         if left <= 0:
             return ""
         batch = _history_page(
-            base, since, max(0, len(jobs) - 1), min(HTTP_TIMEOUT_S, left)
+            base,
+            since,
+            max(0, len(jobs) - 1),
+            min(HTTP_TIMEOUT_S, left),
+            None if clock else clock,  # the first reply's Date only
         )
         if jobs:
             if not batch or _job_key(batch[0]) != _job_key(jobs[-1]):
