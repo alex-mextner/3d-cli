@@ -165,6 +165,16 @@ def test_start_log_skips_broken_lines() -> None:
     assert print_log.starts_since("k1se", 0.0) == 2
 
 
+def test_a_corrupted_utf8_line_skips_only_itself() -> None:
+    """Issue #768: invalid UTF-8 in one line must not drop the valid starts before and after it."""
+    path = print_log.log_path("k1se")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        b'{"at": 1}\n{"at": 2, "remote": "\xff\xfe"}\n\x80\x81\n{"at": 3}\n'
+    )
+    assert print_log.starts_since("k1se", 0.0) == 2
+
+
 def test_a_start_after_a_partial_log_line_is_still_counted() -> None:
     """A failed write can leave an unterminated line; the next start must not be glued onto it."""
     path = print_log.log_path("k1se")
@@ -918,17 +928,13 @@ def test_prints_after_a_clock_rollback_are_still_read(
     assert (count.count, count.exact) == (5, True)
 
 
-@pytest.mark.parametrize("broken", ["permission", "utf8"])
 def test_an_unreadable_start_log_keeps_the_confirmed_prints(
-    monkeypatch: pytest.MonkeyPatch, broken: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = print_log.log_path("k1se")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if broken == "utf8":
-        path.write_bytes(b'{"at": 1}\n\xff\xfe\n')
-    else:
-        path.write_text('{"at": 1}\n', encoding="utf-8")
-        path.chmod(0)
+    path.write_text('{"at": 1}\n', encoding="utf-8")
+    path.chmod(0)
     try:
         jobs = [job(NOW - 3600 * (i + 1)) for i in range(5)] + [{"job_id": "X"}]
 
