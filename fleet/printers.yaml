@@ -72,12 +72,8 @@ u1:
   # extruder..extruder3 and nozzle_diameter 0.4 each: live configfile, 2026-10-14
   heads:
     - {label: T1, index: 0, extruder: extruder, nozzle: {diameter_mm: 0.4, material: stainless, type: std}, usable: true}
-    - label: T2
-      index: 1
-      extruder: extruder1
-      nozzle: {diameter_mm: 0.4, material: stainless, type: std}
-      usable: false
-      reason: "head T2 does not work (babushkin-dom gen/queue.json: «слот 2 — заглушка, голова T2 не работает»; gen/plates.json: «T2 is broken»)"
+    # T2 was marked broken (babushkin-dom gen/queue.json) until the owner stated on 2026-10-20 that all four heads work.
+    - {label: T2, index: 1, extruder: extruder1, nozzle: {diameter_mm: 0.4, material: stainless, type: std}, usable: true}
     - {label: T3, index: 2, extruder: extruder2, nozzle: {diameter_mm: 0.4, material: stainless, type: std}, usable: true}
     - {label: T4, index: 3, extruder: extruder3, nozzle: {diameter_mm: 0.4, material: stainless, type: std}, usable: true}
   ams: []                   # one spool per head on the built-in feeders, no AMS-like unit
