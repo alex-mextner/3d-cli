@@ -1,0 +1,4 @@
+version: 1
+backend: github-issues
+github:
+  repo: alex-mextner/3d-cli
