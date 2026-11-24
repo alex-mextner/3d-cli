@@ -449,6 +449,166 @@ def test_target_printer_is_inferred_from_the_gcode_model(tmp_path: Path) -> None
 
 
 # -- one G-code per FAIL condition ----------------------------------------------------------
+def _nozzle_hrc_case(
+    tmp_path: Path,
+    *,
+    required_hrc: str,
+    nozzle_material: object,
+    loaded: dict[str, Any] | None,
+    gcode_type: str = "PLA",
+) -> preflight.Check:
+    """Exercise the public gate with only T4 used; other tools' HRC must be ignored."""
+    st = state(t3=loaded)
+    head = next(h for h in st["heads"] if h["label"] == "T4")
+    head["nozzle"]["material"] = nozzle_material
+    path = gcode(
+        tmp_path,
+        used_g=(0.0, 0.0, 0.0, 20.0),
+        types=f"PLA;PLA;PLA;{gcode_type}",
+        hrc=f"86,86,86,{required_hrc}",
+        body="T3\nM104 S215 T3\nG1 X1 E1\n",
+    )
+    return run(path, st)["nozzle_compat"]
+
+
+@pytest.mark.parametrize(
+    ("nozzle_material", "required_hrc", "expected"),
+    [
+        ("stainless", "3", "PASS"),
+        ("stainless", "20", "PASS"),
+        ("stainless", "21", "FAIL"),
+        ("stainless", "40", "FAIL"),
+        ("brass", "2", "PASS"),
+        ("brass", "3", "FAIL"),
+        ("hardened", "55", "PASS"),
+        ("hardened", "56", "FAIL"),
+        ("tungsten", "85", "PASS"),
+        ("tungsten", "86", "FAIL"),
+    ],
+)
+def test_nozzle_hrc_compares_requirement_with_installed_hardness(
+    tmp_path: Path, nozzle_material: str, required_hrc: str, expected: str
+) -> None:
+    # Ordinary Generic PLA declares HRC 3; a nonzero minimum is not an abrasive flag.
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc=required_hrc,
+        nozzle_material=nozzle_material,
+        loaded=spool(4, color="FFFFFF", abrasive=False),
+    )
+    assert check.status == expected, check
+    assert f"HRC {required_hrc}" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize("nozzle_material", [None, "ruby"])
+def test_nozzle_hrc_unknown_installed_hardness_is_unverified(
+    tmp_path: Path, nozzle_material: str | None
+) -> None:
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc="3",
+        nozzle_material=nozzle_material,
+        loaded=spool(4, color="FFFFFF", abrasive=False),
+    )
+    assert check.status == "UNVERIFIED", check
+    assert "hardness" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize("malformed_material", [["stainless"], {"kind": "stainless"}])
+@pytest.mark.parametrize("abrasive", [False, True])
+def test_nozzle_hrc_malformed_offline_material_does_not_crash(
+    tmp_path: Path, malformed_material: object, abrasive: bool
+) -> None:
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc="3",
+        nozzle_material=malformed_material,
+        loaded=spool(4, color="FFFFFF", abrasive=abrasive),
+    )
+    assert check.status == ("FAIL" if abrasive else "UNVERIFIED"), check
+    evidence = check.detail + "\n".join(check.lines)
+    assert "hardness is not known" in evidence
+    if abrasive:
+        assert "abrasive filament" in evidence
+
+
+@pytest.mark.parametrize("required_hrc", ["0", "3"])
+@pytest.mark.parametrize("abrasive_source", ["flag", "marker"])
+def test_nozzle_unknown_hardness_does_not_hide_abrasive_policy_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    required_hrc: str,
+    abrasive_source: str,
+) -> None:
+    data = yaml.safe_load(REPO_POLICY.read_text(encoding="utf-8"))
+    data["gates"]["nozzle_compat"]["abrasive_ok"] = ["hardened", "tungsten"]
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setenv("PRINTOPS_POLICY", str(path))
+    loaded = spool(4, color="FFFFFF", abrasive=abrasive_source == "flag")
+    if abrasive_source == "marker":
+        loaded["material"] = "PLA-CF"
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc=required_hrc,
+        nozzle_material="ruby",
+        loaded=loaded,
+    )
+    assert check.status == "FAIL", check
+    evidence = check.detail + "\n".join(check.lines)
+    assert "abrasive filament" in evidence
+    if required_hrc != "0":
+        assert "hardness is not known" in evidence
+
+
+@pytest.mark.parametrize("required_hrc", ["0", "3", "20"])
+def test_nozzle_explicit_abrasive_spool_still_fails_on_stainless(
+    tmp_path: Path, required_hrc: str
+) -> None:
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc=required_hrc,
+        nozzle_material="stainless",
+        loaded=spool(4, color="FFFFFF", abrasive=True),
+    )
+    assert check.status == "FAIL", check
+    assert "abrasive" in check.detail + "\n".join(check.lines)
+
+
+@pytest.mark.parametrize("marker_source", ["spool_material", "spool_name", "gcode_type"])
+@pytest.mark.parametrize("required_hrc", ["0", "3"])
+def test_nozzle_abrasive_marker_is_not_hidden_by_false_spool_flag(
+    tmp_path: Path, marker_source: str, required_hrc: str
+) -> None:
+    loaded = spool(4, color="FFFFFF", abrasive=False)
+    gcode_type = "PLA"
+    if marker_source == "spool_material":
+        loaded["material"] = "PLA-CF"
+    elif marker_source == "spool_name":
+        loaded["name"] = "PLA-GF test"
+    else:
+        gcode_type = "PLA-CF"
+    check = _nozzle_hrc_case(
+        tmp_path,
+        required_hrc=required_hrc,
+        nozzle_material="stainless",
+        loaded=loaded,
+        gcode_type=gcode_type,
+    )
+    assert check.status == "FAIL", check
+    assert "abrasive" in check.detail + "\n".join(check.lines)
+
+
+def test_nozzle_low_hrc_does_not_prove_an_unknown_spool_is_nonabrasive(
+    tmp_path: Path,
+) -> None:
+    check = _nozzle_hrc_case(
+        tmp_path, required_hrc="3", nozzle_material="stainless", loaded=None
+    )
+    assert check.status == "UNVERIFIED", check
+    assert "no spool data" in check.detail + "\n".join(check.lines)
+
+
 FAIL_CASES: dict[str, tuple[dict[str, Any], dict[str, Any], str, str]] = {
     # name: (gcode kwargs, state kwargs, failing check, detail substring)
     "k1_gcode_on_u1": (
@@ -831,3 +991,4 @@ def test_api_state_needs_read_scope(
         headers={"Authorization": f"Bearer {printops_tokens['write']}"},
     )
     assert r.status_code == 403
+
