@@ -1,0 +1,66 @@
+{
+    "from": "User",
+    "inherits": "Snapmaker U1 (0.4 nozzle)",
+    "is_custom_defined": "0",
+    "name": "Snapmaker U1 (0.4 nozzle) - Copy",
+    "printer_flow_support": [
+        "standard",
+        "high_flow"
+    ],
+    "printer_settings_id": "Snapmaker U1 (0.4 nozzle) - Copy",
+    "version": "2.3.3.3",
+    "z_hop": [
+        "0.8",
+        "0.8",
+        "0.8",
+        "0.8"
+    ],
+    "z_hop_when_prime": [
+        "1",
+        "1",
+        "1",
+        "1"
+    ],
+    "z_hop_types": [
+        "Normal Lift",
+        "Normal Lift",
+        "Normal Lift",
+        "Normal Lift"
+    ],
+    "retract_lift_above": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ],
+    "retract_lift_below": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ],
+    "retract_lift_enforce": [
+        "All Surfaces",
+        "All Surfaces",
+        "All Surfaces",
+        "All Surfaces"
+    ],
+    "retraction_minimum_travel": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ],
+    "retract_when_changing_layer": [
+        "1",
+        "1",
+        "1",
+        "1"
+    ],
+    "wipe": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ]
+}
