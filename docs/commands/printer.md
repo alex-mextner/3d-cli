@@ -19,6 +19,8 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 3d printer upload NAME FILE.gcode [--as REMOTE]
 3d printer start NAME FILE.gcode --yes [--as REMOTE] [--source-3mf X.3mf] [--bridge-max MM] [--force] [--secs S]
 3d printer cancel NAME --yes
+3d printer guard NAME --job-id ID --yes [--interval S] [--evidence DIR]
+3d printer guard NAME --job-id ID --dry-run
 3d printer watch NAME... | --all [--steer SESSION] [--exec CMD] [--min-severity LEVEL] ...
 3d printer vision NAME [--interval S] [--once] [--dry-run] [--scene] ...  |  vision eval ...  |  vision record NAME DIR  |  vision fetch-model
 3d printer bed status NAME [--json] [--max-age S]  |  bed reference NAME [--capture [--no-plate]]  |  bed monitor NAME
@@ -39,6 +41,7 @@ Epic: [#90](https://github.com/alex-mextner/3d-cli/issues/90).
 | `upload NAME FILE` | Store the file on the printer and verify its size there. Never starts a print. |
 | `start NAME FILE --yes` | Start a file that was uploaded before. Runs [`3d print-preflight`](print-preflight.md) first. |
 | `cancel NAME --yes` | Cancel the running or paused job. |
+| `guard NAME --job-id ID --yes` | Authorize one automatic native PAUSE of this exact live Moonraker job on confirmed camera failure; [policy and readiness](printer-vision.md#one-job-automatic-pause). |
 | `watch NAME...` | Stay subscribed (read-only) and report anomalies as events — see [Watching printers](#watching-printers). |
 | `vision NAME` | Watch the camera for failed prints (spaghetti, stale/dark camera, the U1's own NPU verdicts) — see [Camera failure detection](#camera-failure-detection). |
 | `bed status` / `reference` / `monitor` | Is the bed clear, is the build plate on — from the camera against an empty-bed reference; also the `bed` start gate and the `bed_clear` event — see [Bed state](#bed-state). |
@@ -61,7 +64,7 @@ Options:
   (`roof_left-1a2b3c4d5e6f7a8b.gcode`), so `start` finds exactly the bytes that were uploaded; pass the
   same `--as` to `start`.
   `3d printer upload k1se "out/roof left.gcode" --as roof_left.gcode`
-- `--yes` — required by `start` and `cancel`: you confirm the physical action.
+- `--yes` — required by `start`, `cancel` and `guard`: you confirm the physical action.
   `3d printer start u1 out/part.gcode --yes`
 - `--bridge-max MM` — preflight overhangs gate: longest bridge; overrides the printer's `bridge_max_mm`.
   `3d printer start u1 out/porch.gcode --yes --bridge-max 25`
@@ -425,6 +428,9 @@ remaining box with a zero-shot CLIP verifier, so textured walls do not count as 
 `vision_spaghetti`, `vision_spaghetti_vetoed` (info), `vision_camera_stale`, `vision_camera_dark`
 and `printer_noodle_verdict` events, plus the opt-in `--scene` bed-change events, through the same
 dispatcher and sinks as `watch` (the device's `watch:` block). It never pauses or cancels.
+For an explicitly authorized automatic pause, start the separate job-bound guard:
+`3d printer guard u1 --job-id 00006D --yes`. It bypasses notification routing and saves
+its decisions locally. [Read the guard policy and readiness contract](printer-vision.md#one-job-automatic-pause).
 `vision record` saves frames with print context, `vision eval` replays footage and prints
 precision/recall, and `vision fetch-model` downloads the weights. Python deps come from the
 `vision` extra (numpy, OpenCV, onnxruntime).
